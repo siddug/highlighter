@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Message Highlighter — read the meaning, not the words</title>
+    <meta
+      name="description"
+      content="A 39,361-parameter model that marks the words in a paragraph that carry its meaning."
+    />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="masthead">
+        <div>
+          <h1>Message Highlighter</h1>
+          <p class="tagline">
+            Marks the words that carry the meaning, so you can read a paragraph without
+            reading all of it.
+          </p>
+        </div>
+        <dl class="spec">
+          <div><dt>params</dt><dd id="metaParams">—</dd></div>
+          <div><dt>weights</dt><dd>21&nbsp;KB</dd></div>
+          <div><dt>runtime</dt><dd id="metaRuntime">browser</dd></div>
+        </dl>
+      </header>
+
+      <section class="samples" aria-label="Sample texts">
+        <span class="samples__label">Try</span>
+        <div id="sampleRow" class="samples__row"></div>
+      </section>
+
+      <main class="grid">
+        <section class="panel panel--input">
+          <div class="panel__head">
+            <h2>Source</h2>
+            <button id="clearBtn" class="ghost" type="button">Clear</button>
+          </div>
+          <textarea
+            id="input"
+            spellcheck="false"
+            placeholder="Paste a paragraph…"
+            aria-label="Source text"
+          ></textarea>
+          <div class="controls">
+            <label class="control">
+              <span class="control__label">Highlight rate</span>
+              <input id="rate" type="range" min="5" max="50" step="1" value="20" />
+              <output id="rateOut">20%</output>
+            </label>
+            <div class="control control--toggle" role="group" aria-label="Inference runtime">
+              <span class="control__label">Run on</span>
+              <div class="segmented">
+                <button id="runBrowser" class="seg is-active" type="button">browser</button>
+                <button id="runServer" class="seg" type="button">server</button>
+              </div>
+            </div>
+          </div>
+          <p id="notice" class="notice" hidden></p>
+        </section>
+
+        <section class="panel panel--output">
+          <div class="panel__head">
+            <h2>Highlighted</h2>
+            <span id="hover" class="hover">hover a word for its score</span>
+          </div>
+          <div id="output" class="reading" aria-live="polite"></div>
+          <dl class="stats">
+            <div><dt>tokens</dt><dd id="statTokens">0</dd></div>
+            <div><dt>words</dt><dd id="statWords">0</dd></div>
+            <div><dt>marked</dt><dd id="statPicked">0</dd></div>
+            <div><dt>time</dt><dd id="statMs">0.0 ms</dd></div>
+            <div id="statDeltaWrap" hidden><dt>vs browser</dt><dd id="statDelta">—</dd></div>
+          </dl>
+        </section>
+      </main>
+
+      <section class="panel panel--digest">
+        <div class="panel__head">
+          <h2>Highlights only</h2>
+          <span class="panel__hint">the real test — does this still tell you what it said?</span>
+        </div>
+        <p id="digest" class="digest"></p>
+      </section>
+
+      <footer class="colophon">
+        <p>
+          Architecture cloned from
+          <a href="https://gpu-lexer.vercel.app" rel="noreferrer" target="_blank">gpu-lexer</a>
+          — feature-bag embedding → local window → learned Blelloch scan → gated MLP head.
+          No transformer, no attention, no learned vocabulary.
+        </p>
+        <p>
+          Trained on 10,000 LLM-labeled paragraphs across Wikipedia, news, essays, work email
+          and research abstracts. Weights are 6-bit quantized: one base-63 character per
+          parameter. <a href="./article.html">Read how it was built &rarr;</a>
+        </p>
+      </footer>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

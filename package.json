@@ -1,0 +1,24 @@
+{
+  "name": "message-highlighter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A tiny, gpu-lexer-shaped neural model that highlights the important words in English prose.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:py": "python3 -m pytest salience/tests -q",
+    "test:all": "npm run typecheck && npm run test && npm run test:py",
+    "golden": "python3 scripts/make_golden.py",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.1",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.4"
+  }
+}
