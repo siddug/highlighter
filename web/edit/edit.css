@@ -108,37 +108,14 @@ body.editing {
 .ProseMirror table { cursor: text; }
 .ProseMirror .selectedCell { background: hsl(22 94% 52% / 0.1); }
 
-/* --- preserved blocks ----------------------------------------------------- */
+/* --- images --------------------------------------------------------------- */
 
-.rawblock {
-  position: relative;
-  margin: 1.5rem 0;
-  border-radius: 10px;
+/* Figures are images now, so they select and delete like any other node. */
+.ProseMirror img {
+  cursor: pointer;
 }
-.rawblock__tag {
-  position: absolute;
-  top: -0.6rem;
-  left: 0.9rem;
-  z-index: 1;
-  font-family: var(--mono);
-  font-size: 0.6rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-  background: var(--paper);
-  padding: 0 0.45rem;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-.rawblock:hover .rawblock__tag { opacity: 1; }
-.rawblock__body > * { margin-top: 0; margin-bottom: 0; }
-
-.rawblock.ProseMirror-selectednode {
+.ProseMirror img.ProseMirror-selectednode {
   outline: 2px solid var(--flame);
-  outline-offset: 3px;
-}
-.rawblock:hover {
-  outline: 1px dashed var(--rule);
   outline-offset: 3px;
 }
 

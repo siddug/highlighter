@@ -127,11 +127,19 @@ The editor writes through to `web/article.content.html` on disk — not localSto
 the article is co-writable: edit in the browser, and the change is a file both authors can
 read and diff. Saving also regenerates the static reader page, so the two never drift.
 
-`web/edit/roundtrip.test.ts` is the load-bearing part. ProseMirror silently discards any
-element its schema does not recognise, so without care the first save would have deleted
-every SVG figure, every callout, and all 59 syntax-colouring spans inside the code blocks —
-141 KB of article reduced to its paragraphs, with no error anywhere. Thirteen assertions
-now pin figures, classes, ids, inline spans and code colouring across two save cycles.
+The article is written in a **portable subset** — paragraphs, headings, lists,
+blockquotes, tables, code blocks and images, and nothing else. It was originally bespoke
+HTML (callout boxes, definition boxes, inline SVG), which rendered well here and would
+survive nothing: paste it into a blog and the custom blocks are stripped, leaving holes.
+`scripts/render_figures.py` turns the ten picture-figures into PNGs and
+`scripts/portablize.py` rewrites the rest — callouts and definitions become blockquotes,
+budget strips become tables. The two text-bearing figures stay as text, because a picture
+of a code listing cannot be edited, searched, or read aloud.
+
+`web/edit/roundtrip.test.ts` is the load-bearing part. ProseMirror silently discards
+anything its schema does not recognise, so ten assertions pin images, blockquotes, tables,
+headings, code blocks, highlights, heading anchors and total word count — and require the
+second save to be byte-identical to the first.
 
 `serve.py` is standard library only — no web framework. It serves the built client and
 exposes the PyTorch model at `POST /api/score`, so the **Run on: browser / server** toggle

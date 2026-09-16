@@ -1,0 +1,1245 @@
+<nav class="toc">
+        <h2>Contents</h2>
+        <p class="part">Part one — the problem</p>
+        <ol>
+          <li><a href="#s1">The problem with summaries</a></li>
+          <li><a href="#s2">The constraint is the design</a></li>
+          <li><a href="#s3">Reading a model that has no documentation</a></li>
+        </ol>
+        <p class="part">Part two — how the model works</p>
+        <ol start="4">
+          <li><a href="#s4">Everything is a grid of numbers</a></li>
+          <li><a href="#s5">Text to integers: the tokenizer</a></li>
+          <li><a href="#s6">A vocabulary you do not store</a></li>
+          <li><a href="#s7">The local window</a></li>
+          <li><a href="#s8">Whole-document context without attention</a></li>
+          <li><a href="#s9">The head, and what a logit is</a></li>
+        </ol>
+        <p class="part">Part three — how it learns</p>
+        <ol start="10">
+          <li><a href="#s10">Where the answers come from</a></li>
+          <li><a href="#s11">What training actually does</a></li>
+          <li><a href="#s12">The loss function, all three parts</a></li>
+          <li><a href="#s13">Three bugs worth describing</a></li>
+        </ol>
+        <p class="part">Part four — how we know</p>
+        <ol start="14">
+          <li><a href="#s14">Measuring the right thing</a></li>
+          <li><a href="#s15">One character per parameter</a></li>
+          <li><a href="#s16">Three implementations, one answer</a></li>
+        </ol>
+        <p class="part">Part five — how far it can go</p>
+        <ol start="17">
+          <li><a href="#s17">Results</a></li>
+          <li><a href="#s18">The ceiling, and the road to 0.9</a></li>
+          <li><a href="#s19">What transferred</a></li>
+        </ol>
+      </nav><div class="part-head">
+        <span class="label">Part one</span>
+        <h2>The problem</h2>
+        <p>What we are building, why it has to be small, and where the design came from.</p>
+      </div><h2 id="s1"><span class="num">01</span>The problem with summaries</h2><p>You have forty unread Slack messages, six PRDs, and a research paper you promised to read. The standard answer is summarization: feed it to a model, get back three sentences. And summaries are genuinely useful — but they have a property that is easy to overlook. <strong>A summary is new text.</strong> Someone, or something, decided what mattered and then wrote fresh sentences asserting it. You cannot check the summary against the source without reading the source, which is what you were trying to avoid.</p><p>Highlighting is a different operation. It does not generate; it <em>selects</em>. Every word you read is a word the author actually wrote, in the order they wrote it. There is nothing to hallucinate, because nothing is being produced. The reader's eye does the rest — you skim the marked words, and if something surprises you, the surrounding context is right there.</p><figure>
+        <p class="fig-label">Figure 1 — Three ways to read the same paragraph</p>
+
+        <div class="reading-demo">
+          <span class="tag">The source · 65 words</span>
+          Hey team, heads up: the staging deploy failed twice this morning because the
+          migration lock wasn't released. I've rolled back to build 412 and we are NOT
+          shipping today. Ravi is looking into the lock cleanup; I'll post an update by 4pm.
+          If you need staging urgently, ping me directly rather than retrying the deploy.
+        </div>
+
+        <div class="reading-demo">
+          <span class="tag">A summary · new sentences, unverifiable without the source</span>
+          <em>The staging deployment failed due to a migration lock issue. The team has rolled
+            back and paused today's release while investigating.</em>
+        </div>
+
+        <div class="reading-demo">
+          <span class="tag">Highlighted · 20% of words, all original, in order</span>
+          <span class="dim">Hey team,</span> <mark class="hi">heads</mark>
+          <span class="dim">up: the</span> <mark class="hi">staging deploy failed twice</mark>
+          <span class="dim">this morning because the migration</span>
+          <mark class="hi">lock wasn't</mark> <span class="dim">released. I've</span>
+          <mark class="hi">rolled</mark> <span class="dim">back to</span>
+          <mark class="hi">build 412</mark> <span class="dim">and we are</span>
+          <mark class="hi">NOT</mark> <span class="dim">shipping today. Ravi is looking into
+          the lock cleanup; I'll</span> <mark class="hi">post</mark>
+          <span class="dim">an update by</span> <mark class="hi">4pm</mark>.
+          <span class="dim">If you need staging urgently, ping me directly rather than
+          retrying the deploy.</span>
+        </div>
+
+        <div class="reading-demo">
+          <span class="tag">What your eye actually collects</span>
+          <span class="telegram">heads staging deploy failed twice lock wasn't rolled build 412 NOT post 4pm</span>
+        </div>
+
+        <figcaption>
+          Note what the summary dropped: <b>build 412</b> and <b>4pm</b>. Note what the
+          highlighter kept: <b>NOT</b>. That word is the difference between "we shipped" and
+          "we did not ship", and it is exactly the word every frequency-based keyword
+          extractor throws away.
+        </figcaption>
+      </figure><p>So: a model that takes a paragraph and scores every word by how much meaning it carries. That is the whole specification. The interesting part is not <em>whether</em> this is possible — a large language model does it easily — but whether it can be done small enough to run on every paragraph on a page, locally, while you scroll.</p><h2 id="s2"><span class="num">02</span>The constraint is the design</h2><p>If the model has to run on every paragraph as you scroll, it cannot be a round trip to a server, and it cannot be a 400&nbsp;MB download. That constraint eliminates almost everything that would be the obvious choice in 2026.</p><div class="define">
+        <span class="term">Parameter</span>
+        <p>
+          A single number the model learns. Not something you write — something the training
+          process discovers. "39,361 parameters" means the entire behaviour of this model is
+          determined by 39,361 numbers. GPT-4-class models have hundreds of billions. A
+          parameter is typically stored as a 32-bit float, so 39,361 of them is about
+          157&nbsp;KB before we compress anything.
+        </p>
+      </div><figure>
+        <p class="fig-label">Figure 2 — Parameter counts, log scale</p>
+        <div class="bars">
+          <div class="bar-row">
+            <span class="bar-name">BERT-base</span>
+            <span class="bar-track"><span class="bar-fill" style="width:100%"></span></span>
+            <span class="bar-val">110M</span>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">DistilBERT</span>
+            <span class="bar-track"><span class="bar-fill" style="width:94.5%"></span></span>
+            <span class="bar-val">66M</span>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">MiniLM-L6</span>
+            <span class="bar-track"><span class="bar-fill" style="width:82.7%"></span></span>
+            <span class="bar-val">22M</span>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">gpu-lexer</span>
+            <span class="bar-track"><span class="bar-fill" style="width:15.2%"></span></span>
+            <span class="bar-val">41.3K</span>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">this model</span>
+            <span class="bar-track"><span class="bar-fill ours" style="width:14.7%"></span></span>
+            <span class="bar-val">39.4K</span>
+          </div>
+        </div>
+        <figcaption>
+          Roughly <b>2,800×</b> smaller than BERT-base. At that size the usual toolkit stops
+          applying: a single transformer layer at d=768 is 7M parameters, and a WordPiece
+          vocabulary alone is 23M. You cannot afford either. You cannot afford
+          <em>a vocabulary at all</em>.
+        </figcaption>
+      </figure><p>This is where gpu-lexer becomes interesting. It solves a structurally identical problem — label every token in a document, using both local and whole-document context, in a package small enough to ship — and it solves it without a transformer, without attention, and without a learned vocabulary.</p><h2 id="s3"><span class="num">03</span>Reading a model that has no documentation</h2><p><a target="_blank" rel="noreferrer" href="https://gpu-lexer.vercel.app">gpu-lexer</a> is by Shu Ding at Vercel Labs. The site reports 41,321 parameters trained on 4,688,781 tokens, 27.4&nbsp;KB minified and Brotli-compressed, 88.02% agreement with Shiki on held-out files, and support for 75+ languages from a single model.</p><p>There is no public repository. GitHub code search for <code>gpu-lexer</code> returns nothing; the site links only to the Vercel Labs org root. There is no blog post. The Hacker News thread has 33 comments and zero from the author — someone asks "any mention of the training process?" and it goes unanswered.</p><p>But the package is on npm as <code>gpu-lexer@0.0.2</code>: MIT, 60&nbsp;KB unpacked, a single <code>dist/index.js</code>. The weights are one 41,321-character string, and the shader source is right there. Everything below was decoded from that artifact.</p><figure>
+        <p class="fig-label">Figure 3 — The architecture, as recovered</p>
+        <svg viewBox="0 0 680 208" role="img" aria-label="Pipeline diagram">
+          <g>
+            <rect class="box" x="4" y="44" width="92" height="46" rx="6"></rect>
+            <text class="t-title" x="50" y="63" text-anchor="middle">tokenize</text>
+            <text class="t-small" x="50" y="78" text-anchor="middle">4 classes</text>
+          </g>
+          <g>
+            <rect class="box-hi" x="120" y="44" width="110" height="46" rx="6"></rect>
+            <text class="t-title" x="175" y="63" text-anchor="middle">feature bag</text>
+            <text class="t-small" x="175" y="78" text-anchor="middle">737×32 summed</text>
+          </g>
+          <g>
+            <rect class="box" x="254" y="44" width="100" height="46" rx="6"></rect>
+            <text class="t-title" x="304" y="63" text-anchor="middle">local ±2</text>
+            <text class="t-small" x="304" y="78" text-anchor="middle">+2 pointers</text>
+          </g>
+          <g>
+            <rect class="box-cool" x="378" y="18" width="128" height="46" rx="6"></rect>
+            <text class="t-title" x="442" y="37" text-anchor="middle">scan →</text>
+            <text class="t-small" x="442" y="52" text-anchor="middle">forward prefix</text>
+          </g>
+          <g>
+            <rect class="box-cool" x="378" y="70" width="128" height="46" rx="6"></rect>
+            <text class="t-title" x="442" y="89" text-anchor="middle">← scan</text>
+            <text class="t-small" x="442" y="104" text-anchor="middle">backward prefix</text>
+          </g>
+          <g>
+            <rect class="box" x="530" y="44" width="96" height="46" rx="6"></rect>
+            <text class="t-title" x="578" y="63" text-anchor="middle">gated MLP</text>
+            <text class="t-small" x="578" y="78" text-anchor="middle">1 logit</text>
+          </g>
+
+          <path class="arrow" d="M96 67 H118" marker-end="url(#ah)"></path>
+          <path class="arrow" d="M230 67 H252" marker-end="url(#ah)"></path>
+          <path class="arrow" d="M354 67 H366 V41 H376" marker-end="url(#ah)"></path>
+          <path class="arrow" d="M354 67 H366 V93 H376" marker-end="url(#ah)"></path>
+          <path class="arrow" d="M506 41 H518 V67 H528" marker-end="url(#ah)"></path>
+          <path class="arrow" d="M506 93 H518 V67 H528" marker-end="url(#ah)"></path>
+          <path class="arrow" d="M354 67 H362 V132 H570 V92" marker-end="url(#ah)"></path>
+
+          <defs>
+            <marker id="ah" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 0 L8 4 L0 8 z" fill="#8f8b80"></path>
+            </marker>
+          </defs>
+
+          <text class="t-tiny" x="175" y="104" text-anchor="middle">23,584 params · 60%</text>
+          <text class="t-tiny" x="304" y="104" text-anchor="middle">256</text>
+          <text class="t-tiny" x="442" y="130" text-anchor="middle">5,760</text>
+          <text class="t-tiny" x="578" y="104" text-anchor="middle">9,761</text>
+
+          <text class="t-small" x="362" y="152" text-anchor="middle">local features skip ahead to the head</text>
+
+          <line x1="4" y1="172" x2="676" y2="172" stroke="#e4e0d6"></line>
+          <text class="t-small" x="4" y="190">no attention</text>
+          <text class="t-small" x="140" y="190">no vocabulary</text>
+          <text class="t-small" x="290" y="190">no normalization layers</text>
+          <text class="t-small" x="480" y="190">d_model = 32 throughout</text>
+        </svg>
+        <figcaption>
+          Our version. gpu-lexer's is the same shape with one forward scan instead of two and
+          nine output logits instead of one. <b>Sixty percent of the model is the embedding
+          table</b> — the "intelligence" budget is tiny, and almost all of the parameters go
+          into representing what a token <em>is</em>.
+        </figcaption>
+      </figure><p>The rest of this article walks that diagram left to right, then explains how the numbers inside it were found.</p><div class="part-head">
+        <span class="label">Part two</span>
+        <h2>How the model works</h2>
+        <p>
+          The forward pass, end to end. Text goes in, one number per word comes out. No
+          training yet — just the machine.
+        </p>
+      </div><h2 id="s4"><span class="num">04</span>Everything is a grid of numbers</h2><p>Before any code makes sense, one idea has to be in place: a neural network does not operate on text. It operates on <strong>tensors</strong> — rectangular grids of numbers — and almost all of the work in building one is getting the shapes of those grids to line up.</p><div class="define">
+        <span class="term">Tensor</span>
+        <p>
+          An array of numbers with a shape. A list of 32 numbers is a tensor of shape
+          <code>(32,)</code>. A table with 100 rows of 32 numbers is <code>(100, 32)</code>.
+          Three of those tables stacked is <code>(3, 100, 32)</code>. That is the whole
+          concept — "tensor" is just a word for "n-dimensional array".
+        </p>
+        <p>
+          PyTorch's job is to make arithmetic on these fast, and — crucially — to remember how
+          each one was computed so it can work out how to improve them later.
+        </p>
+      </div><p>Nearly every tensor in this model has three dimensions, always in the same order:</p><pre><code>(B, T, D)
+ │  │  └── <b>D</b>  features per token — always 32. Called "d_model".
+ │  └───── <b>T</b>  tokens in the sequence. A 65-word paragraph
+ │            is ~139 tokens, counting spaces and punctuation.
+ └──────── <b>B</b>  paragraphs processed at once — the "batch".</code></pre><div class="define">
+        <span class="term">Batch</span>
+        <p>
+          Several paragraphs stacked and processed simultaneously. Not because we need the
+          answers together, but because modern hardware is far faster at one big matrix
+          multiply than at 32 small ones. We use batches of 32.
+        </p>
+        <p>
+          Paragraphs have different lengths, so they are <em>padded</em> to a common length
+          with filler, and the filler is masked out so it cannot affect the real answers.
+        </p>
+      </div><p>So the entire forward pass is a sequence of shape transformations. Here is the whole model as shapes, which is genuinely the fastest way to understand it:</p><figure>
+        <p class="fig-label">Figure 4 — The shape of the computation</p>
+        <pre><code><span class="c">                        shape        actual     why that number</span>
+text     "Engineers did not…"
+  ↓ tokenize
+tokens   [Engineers][ ][did]…       139 tokens
+  ↓ extract features
+rows     (B, T, <b>R</b>)          32×256×R    <b>R</b>  = one row per applicable feature
+  ↓ embedding lookup + sum
+emb      (B, T, <b>32</b>)         32×256×32   <b>32</b> = d_model, the row width
+  ↓ local window ±2, 2 pointers
+local    (B, T, 32)         32×256×32
+  ↓ forward scan   ↓ backward scan
+gf (B,T,32)        gb (B,T,32)
+  ↓ concatenate [local, gf, gb]
+x        (B, T, <b>96</b>)         32×256×96   <b>96</b> = 32 × 3 vectors joined
+  ↓ gated MLP head
+logits   (B, T)             32×256      one raw number per token
+  ↓ sigmoid
+scores   (B, T)             32×256      squashed into 0 … 1</code></pre>
+        <figcaption>
+          <b>B</b> = 32 paragraphs at a time, <b>T</b> = 256 tokens after padding.
+          <br><br>
+          <b>R</b> is the only entry here that is not a fixed number. A token gets one row per
+          feature that applies to it, and different tokens have different numbers of features —
+          so <code>rows</code> is genuinely ragged at this stage. Section 6 explains what those
+          features are; section 7 explains the 96.
+          <br><br>
+          The only place <em>integers</em> appear is <code>rows</code>: those are addresses into
+          a lookup table, not quantities. Everything from <code>emb</code> onward is floating
+          point, and the shapes never change again until the head collapses 96 down to 1.
+        </figcaption>
+      </figure><h2 id="s5"><span class="num">05</span>Text to integers: the tokenizer</h2><p>A tokenizer chops text into units. Ours is deliberately simple — one left-to-right pass, four kinds of token, no learning involved:</p><p class="filename">salience/features.py</p><pre><code><span class="k">def</span> tokenize(normalized: str) -&gt; list[RawToken]:
+    cps = list(normalized)          <span class="c"># code points, so emoji behave</span>
+    i = 0
+    <span class="k">while</span> i &lt; n:
+        ch = cps[i]
+        <span class="k">if</span> ch == <span class="s">"\n"</span>:
+            tokens.append(RawToken(NEWLINE, i, i + 1, <span class="s">"\n"</span>))
+            i += 1
+        <span class="k">elif</span> ch <span class="k">in</span> (<span class="s">" "</span>, <span class="s">"\t"</span>):
+            start = i
+            <span class="k">while</span> i &lt; n <span class="k">and</span> cps[i] <span class="k">in</span> (<span class="s">" "</span>, <span class="s">"\t"</span>):
+                i += 1
+            tokens.append(RawToken(SPACE, start, i, text))
+        <span class="k">elif</span> _is_alnum(ch):
+            start = i; i += 1
+            <span class="k">while</span> i &lt; n:
+                c = cps[i]
+                <span class="k">if</span> _is_alnum(c):
+                    i += 1
+                <span class="c"># don't, state-of-the-art</span>
+                <span class="k">elif</span> c <span class="k">in</span> (<span class="s">"'"</span>, <span class="s">"-"</span>) <span class="k">and</span> _is_alnum(cps[i + 1]):
+                    i += 1
+                <span class="c"># 1.6 and 10,000 stay whole — digits on both sides</span>
+                <span class="k">elif</span> (c <span class="k">in</span> (<span class="s">"."</span>, <span class="s">","</span>)
+                      <span class="k">and</span> _is_digit(cps[i + 1])
+                      <span class="k">and</span> _is_digit(cps[i - 1])):
+                    i += 1
+                <span class="k">else</span>:
+                    <span class="k">break</span>
+            tokens.append(RawToken(WORD, start, i, text))
+        <span class="k">else</span>:
+            tokens.append(RawToken(PUNCT, i, i + 1, ch))
+            i += 1</code></pre><p>Four classes: <code>WORD</code>, <code>SPACE</code>, <code>NEWLINE</code>, <code>PUNCT</code>. Every character ends up in exactly one token, so gluing the tokens back together reproduces the input exactly — a property the tests check on 2,000 adversarial inputs, because if it ever fails, highlight positions drift and the rendering is silently wrong.</p><p>The two <code>elif</code> branches in the middle are the interesting part. They decide what counts as "inside" a word. <code>don't</code> is one word. <code>1.6</code> is one word. But <code>Section 1. The</code> is not, because the period there has a space after it rather than a digit. That second rule was added after seeing what happened without it, which we will get to.</p><h2 id="s6"><span class="num">06</span>A vocabulary you do not store</h2><p>Now the first genuinely clever idea. A model needs to turn each token into a vector — a list of 32 numbers that represents what that token <em>is</em>. The standard approach is a lookup table: build a vocabulary of 30,000 subwords and store a learned vector for each one.</p><div class="define">
+        <span class="term">Embedding</span>
+        <p>
+          The vector that represents a token. "Embedding" because you are embedding a discrete
+          thing (a word) into a continuous space (32 numbers), where distance means something —
+          similar words end up nearby. These vectors are learned, not designed.
+        </p>
+      </div><p>At 32 numbers per entry, a 30,000-word vocabulary is 960,000 parameters — 25× our entire budget, for the lookup table alone. So gpu-lexer does not have one.</p><p>Instead, each token is described by a set of <strong>hand-chosen features</strong>: what class it is, two hashes of its letters, a hash of its last three letters, whether it is a stopword, how long it is, where it sits in the sentence, and so on. The rule is simple and worth stating once, precisely:</p><blockquote><p>Every feature that applies to a token contributes <strong>exactly one row</strong> of a shared table, and the token's embedding is the <strong>sum</strong> of those rows.</p></blockquote><p>That sentence hides three separate ideas, so let us take them apart one at a time.</p><h3>What "index" means: it is a row number</h3><div class="define">
+        <span class="term">Index</span>
+        <p>
+          An address. If the table is a 737-row spreadsheet where each row holds 32 numbers,
+          then "index 153" means <em>row 153</em> — nothing more exotic than
+          <code>table[153]</code>.
+        </p>
+      </div><p>So each feature is converted into a row number, and the question is how. The answer is address arithmetic: <strong>every field owns a reserved block of the table</strong>, and the row number is the block's starting offset plus the field's value.</p><p>Token class owns rows 0–7, because there are at most 8 classes. Hash A owns rows 8–263, because an 8-bit hash has 256 possible values. Hash B owns the next 256, and so on. It is the same layout logic as fields in a C struct: everybody gets a range, and you add the offset to the value.</p><p>Here is the real arithmetic for one real word — <code>criticality</code>, in the sentence "The reactor achieved criticality on Tuesday":</p><pre><code>field                 value  + offset  =  row
+------------------------------------------------
+token class               0        0        0
+hash A                  145        8      153
+hash B                   84      264      348
+suffix hash "ity"        59      520      579
+prefix hash "cri"         7      584      591
+stopword bucket           0      616      616
+length bucket             9      641      650
+sentence position        16      657      673
+document position        16      689      705
+in-doc frequency          0      721      721
+
+embedding = row[0] + row[153] + row[348] + … + row[721]
+            <span class="c">ten 32-number rows, added together, giving 32 numbers</span></code></pre><h3>The complete feature list</h3><p>Here is every feature, how many rows of the table it owns, and why. One rule explains the whole column: <strong>a feature owns one row for every distinct value it can take</strong>. A feature with 16 possible values needs 16 rows, because any one of them might be the one that fires.</p><table style="min-width: 150px;"><colgroup><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"></colgroup><tbody><tr><th colspan="1" rowspan="1"><p>#</p></th><th colspan="1" rowspan="1"><p>feature</p></th><th colspan="1" rowspan="1"><p>rows</p></th><th colspan="1" rowspan="1"><p>range</p></th><th colspan="1" rowspan="1"><p>params</p></th><th colspan="1" rowspan="1"><p>applies to</p></th></tr><tr><td colspan="1" rowspan="1"><p>1</p></td><td colspan="1" rowspan="1"><p>token class</p></td><td colspan="1" rowspan="1"><p>8</p></td><td colspan="1" rowspan="1"><p>0–7</p></td><td colspan="1" rowspan="1"><p>256</p></td><td colspan="1" rowspan="1"><p>every token</p></td></tr><tr><td colspan="1" rowspan="1"><p>2</p></td><td colspan="1" rowspan="1"><p>hash A</p></td><td colspan="1" rowspan="1"><p>256</p></td><td colspan="1" rowspan="1"><p>8–263</p></td><td colspan="1" rowspan="1"><p>8,192</p></td><td colspan="1" rowspan="1"><p>words</p></td></tr><tr><td colspan="1" rowspan="1"><p>3</p></td><td colspan="1" rowspan="1"><p>hash B</p></td><td colspan="1" rowspan="1"><p>256</p></td><td colspan="1" rowspan="1"><p>264–519</p></td><td colspan="1" rowspan="1"><p>8,192</p></td><td colspan="1" rowspan="1"><p>words</p></td></tr><tr><td colspan="1" rowspan="1"><p>4</p></td><td colspan="1" rowspan="1"><p>suffix hash</p></td><td colspan="1" rowspan="1"><p>64</p></td><td colspan="1" rowspan="1"><p>520–583</p></td><td colspan="1" rowspan="1"><p>2,048</p></td><td colspan="1" rowspan="1"><p>words</p></td></tr><tr><td colspan="1" rowspan="1"><p>5</p></td><td colspan="1" rowspan="1"><p>prefix hash</p></td><td colspan="1" rowspan="1"><p>32</p></td><td colspan="1" rowspan="1"><p>584–615</p></td><td colspan="1" rowspan="1"><p>1,024</p></td><td colspan="1" rowspan="1"><p>words</p></td></tr><tr><td colspan="1" rowspan="1"><p>6</p></td><td colspan="1" rowspan="1"><p>stopword bucket</p></td><td colspan="1" rowspan="1"><p>16</p></td><td colspan="1" rowspan="1"><p>616–631</p></td><td colspan="1" rowspan="1"><p>512</p></td><td colspan="1" rowspan="1"><p>words</p></td></tr><tr><td colspan="1" rowspan="1"><p>7–15</p></td><td colspan="1" rowspan="1"><p>flags (nine of them)</p></td><td colspan="1" rowspan="1"><p>9</p></td><td colspan="1" rowspan="1"><p>632–640</p></td><td colspan="1" rowspan="1"><p>288</p></td><td colspan="1" rowspan="1"><p>words</p></td></tr><tr><td colspan="1" rowspan="1"><p>16</p></td><td colspan="1" rowspan="1"><p>length bucket</p></td><td colspan="1" rowspan="1"><p>16</p></td><td colspan="1" rowspan="1"><p>641–656</p></td><td colspan="1" rowspan="1"><p>512</p></td><td colspan="1" rowspan="1"><p>words</p></td></tr><tr><td colspan="1" rowspan="1"><p>17</p></td><td colspan="1" rowspan="1"><p>sentence position</p></td><td colspan="1" rowspan="1"><p>32</p></td><td colspan="1" rowspan="1"><p>657–688</p></td><td colspan="1" rowspan="1"><p>1,024</p></td><td colspan="1" rowspan="1"><p>every token</p></td></tr><tr><td colspan="1" rowspan="1"><p>18</p></td><td colspan="1" rowspan="1"><p>document position</p></td><td colspan="1" rowspan="1"><p>32</p></td><td colspan="1" rowspan="1"><p>689–720</p></td><td colspan="1" rowspan="1"><p>1,024</p></td><td colspan="1" rowspan="1"><p>every token</p></td></tr><tr><td colspan="1" rowspan="1"><p>19</p></td><td colspan="1" rowspan="1"><p>in-doc frequency</p></td><td colspan="1" rowspan="1"><p>16</p></td><td colspan="1" rowspan="1"><p>721–736</p></td><td colspan="1" rowspan="1"><p>512</p></td><td colspan="1" rowspan="1"><p>words</p></td></tr><tr><td colspan="1" rowspan="1"><p></p></td><td colspan="1" rowspan="1"><p>total</p></td><td colspan="1" rowspan="1"><p>737</p></td><td colspan="1" rowspan="1"><p>0–736</p></td><td colspan="1" rowspan="1"><p>23,584</p></td><td colspan="1" rowspan="1"><p></p></td></tr></tbody></table><p>Three features apply to <em>every</em> token — class, sentence position, document position — which is why a space still gets three rows. The rest are word-only, and are omitted for punctuation and whitespace because they mean nothing there.</p><h4>The ten single-valued features, one at a time</h4><p>Each of these has exactly one value per token, so each contributes exactly one row. Below: what it is, how it is computed, and why it owns the number of rows it does. Throughout, <code>s</code> means the ASCII-lowercased UTF-8 bytes of the token.</p><h4>1 · Token class — 8 rows</h4><pre><code>row = 0 + class          <span class="c">WORD=0  SPACE=1  NEWLINE=2  PUNCT=3</span></code></pre><p>Straight from the tokenizer. <strong>8 rows because 3 bits were reserved</strong>, but only 4 classes exist — so four rows never fire. 128 wasted parameters, and the only genuinely accidental allocation in the table.</p><h4>2 &amp; 3 · Hash A and hash B — 256 rows each</h4><pre><code>hashA = MIX(FNV(s, basis=2166136261, prime=16777619)) &amp; 0xFF
+hashB = MIX(FNV(s, basis=1166136321, prime=2246822519)) &amp; 0xFF
+
+FNV(bytes, basis, prime):        <span class="c">standard FNV-1a</span>
+    h = basis
+    for b in bytes: h = ((h XOR b) * prime) mod 2³²
+
+MIX(h):                          <span class="c">xorshift-multiply avalanche</span>
+    h ^= h &gt;&gt;&gt; 16;  h = (h * 2246822507) mod 2³²
+    h ^= h &gt;&gt;&gt; 13;  h = (h * 3266489909) mod 2³²
+    h ^= h &gt;&gt;&gt; 16</code></pre><p>This is the token's <em>identity</em>. FNV-1a alone clusters similar strings, so the avalanche step scrambles the result before we take the low 8 bits — otherwise <code>cat</code> and <code>car</code> would often land in the same bucket.</p><p><strong>256 rows each, because 8 bits gives 256 values.</strong> And two hashes rather than one: a single 16-bit hash would distinguish the same 65,536 identities but needs 65,536 rows — 2.1M parameters, <em>53× the whole model</em>. Two 8-bit hashes cost 512 rows and the <em>pair</em> still separates 65,536. The only price is that two words occasionally collide on both, which the rest of the features usually resolve.</p><h4>4 · Suffix hash — 64 rows</h4><pre><code>suffixHash = MIX(FNV(<b>last 3 bytes</b> of s, 2166136261, 16777619)) &amp; 0x3F</code></pre><p>Same machinery, applied to the tail. This is an English part-of-speech proxy: <code>-ing</code>, <code>-ion</code>, <code>-ly</code>, <code>-ed</code>, <code>-ness</code> tell you a great deal about a word's grammatical role, and role correlates strongly with importance.</p><p><strong>64 rows because 6 bits.</strong> Fewer than the surface hashes because the space being hashed is far smaller — English has dozens of productive suffixes, not tens of thousands — so 64 buckets already makes collisions among the ones that matter rare.</p><h4>5 · Prefix hash — 32 rows</h4><pre><code>prefixHash = MIX(FNV(<b>first 3 bytes</b> of s, 2166136261, 16777619)) &amp; 0x1F</code></pre><p><strong>32 rows because 5 bits</strong> — half the resolution of the suffix. English prefixes (<code>un-</code>, <code>re-</code>, <code>de-</code>, <code>pre-</code>) are a smaller and less informative set than suffixes, so they get a smaller budget.</p><h4>6 · Stopword bucket — 16 rows</h4><pre><code>rank = position of s in an ordered 201-word list, most frequent first
+bucket = 0                       <span class="c">if not in the list</span>
+bucket = min(15, 1 + rank // 16) <span class="c">otherwise → 1…13 in practice</span></code></pre><p><strong>16 rows because 4 bits</strong>, though only 14 are reachable: the list is 201 words, so <code>1 + 200//16 = 13</code> is the ceiling and rows 14–15 are dead.</p><p>The important design choice here is that it is <em>graded rather than binary</em>. A single "is a stopword" bit would lump <code>the</code> together with <code>not</code> and <code>but</code> — and those two carry the whole meaning of a clause. Banding by frequency rank lets the model learn that the very top of the list is noise while the tail of it is not.</p><h4>7 · Length bucket — 16 rows</h4><pre><code>length = number of code points
+bucket = first i where length &lt;= edges[i], else 15
+edges  = (1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 19, 24, 31, 47)</code></pre><p>Note the spacing: lengths 1–8 each get their own bucket, then the bands widen. Short words are common and a single character matters down there — <code>a</code> versus <code>an</code> versus <code>and</code> — while at the top end 37 characters versus 38 is a distinction nobody can use.</p><p><strong>16 rows</strong> because that is how many bands the edges define. Raw length would need 50+ rows to encode mostly-meaningless detail.</p><h4>8 · Sentence position — 32 rows</h4><pre><code>row = ROW_SENT_POS + min(31, (32 * index_within_sentence) // sentence_length)</code></pre><p><strong>Relative, not absolute.</strong> A word 5 tokens into a 10-token sentence and one 20 tokens into a 40-token sentence both land in bucket 16 — they are both halfway through. An absolute index would make short and long sentences incomparable and would need as many rows as the longest sentence.</p><p><strong>32 rows</strong> is the chosen granularity: fine enough to separate opening, middle and closing, coarse enough to stay cheap.</p><h4>9 · Document position — 32 rows</h4><pre><code>row = ROW_DOC_POS + min(31, (32 * token_index) // total_tokens)</code></pre><p>The same idea across the whole paragraph rather than the sentence. It exists because prose has structure: topic sentences lead, qualifications trail. Same 32 buckets, same reasoning.</p><h4>10 · In-document frequency — 16 rows</h4><pre><code>count  = how many times s appears in <b>this paragraph</b>
+bucket = first i where count &lt;= edges[i], else 15
+edges  = (1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 24, 32, 48, 64)</code></pre><p>A word repeated inside one paragraph is very often its topic. Counts 1–8 get individual buckets for the same reason lengths do — the difference between appearing once and three times is real, the difference between 40 and 48 is not.</p><p><strong>16 rows</strong>, of which 12 are reachable: our paragraphs cap at 130 words, so the buckets for 33+ occurrences can never fire.</p><div class="callout">
+        <span class="tag">How much of that allocation is actually used?</span>
+        <p>
+          Worth checking rather than assuming. Counting which rows ever fire across 3,000 real
+          paragraphs: the hashes, prefix, suffix, flags and both position features use
+          <strong>100%</strong> of their rows. Four do not — token class uses 4 of 8, stopword
+          14 of 16, length 15 of 16, frequency 12 of 16.
+        </p>
+        <p>
+          And two of those are <em>structurally unreachable</em> rather than merely rare. The
+          stopword list is 200 words long, so the bucket formula tops out at 13 and rows 14–15
+          can never fire; and a paragraph capped at 130 words can never reach the frequency
+          buckets for 33+ occurrences. Eleven dead rows, 352 parameters,
+          <strong>0.9% of the model</strong>. Small enough to leave, but better known than
+          discovered.
+        </p>
+      </div><h3>The nineteen, grouped</h3><p><strong>Ten always apply to a word</strong> — class, hash A, hash B, suffix, prefix, stopword bucket, length, sentence position, document position, frequency. Each has exactly one value, so each gives exactly one row. That is why a plain word gets ten.</p><p><strong>Nine are optional properties</strong> — the flags. Each one that is <em>true</em> adds its own row; each one that is false adds nothing. Here they are in full, with how often each actually fires, measured over 279,567 real word tokens:</p><table style="min-width: 125px;"><colgroup><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"></colgroup><tbody><tr><th colspan="1" rowspan="1"><p>bit</p></th><th colspan="1" rowspan="1"><p>row</p></th><th colspan="1" rowspan="1"><p>flag</p></th><th colspan="1" rowspan="1"><p>true when</p></th><th colspan="1" rowspan="1"><p>fires</p></th></tr><tr><td colspan="1" rowspan="1"><p>0</p></td><td colspan="1" rowspan="1"><p>632</p></td><td colspan="1" rowspan="1"><p>CAPITALIZED</p></td><td colspan="1" rowspan="1"><p>first character is uppercase and the token is not all-caps</p></td><td colspan="1" rowspan="1"><p>14.0%</p></td></tr><tr><td colspan="1" rowspan="1"><p>1</p></td><td colspan="1" rowspan="1"><p>633</p></td><td colspan="1" rowspan="1"><p>ALL_CAPS</p></td><td colspan="1" rowspan="1"><p>two or more letters and every letter is uppercase</p></td><td colspan="1" rowspan="1"><p>1.2%</p></td></tr><tr><td colspan="1" rowspan="1"><p>2</p></td><td colspan="1" rowspan="1"><p>634</p></td><td colspan="1" rowspan="1"><p>HAS_DIGIT</p></td><td colspan="1" rowspan="1"><p>contains at least one digit</p></td><td colspan="1" rowspan="1"><p>2.1%</p></td></tr><tr><td colspan="1" rowspan="1"><p>3</p></td><td colspan="1" rowspan="1"><p>635</p></td><td colspan="1" rowspan="1"><p>ALL_DIGITS</p></td><td colspan="1" rowspan="1"><p>every character is a digit</p></td><td colspan="1" rowspan="1"><p>1.6%</p></td></tr><tr><td colspan="1" rowspan="1"><p>4</p></td><td colspan="1" rowspan="1"><p>636</p></td><td colspan="1" rowspan="1"><p>HAS_HYPHEN</p></td><td colspan="1" rowspan="1"><p>contains a hyphen (U+002D)</p></td><td colspan="1" rowspan="1"><p>1.1%</p></td></tr><tr><td colspan="1" rowspan="1"><p>5</p></td><td colspan="1" rowspan="1"><p>637</p></td><td colspan="1" rowspan="1"><p>HAS_APOSTROPHE</p></td><td colspan="1" rowspan="1"><p>contains an apostrophe (U+0027)</p></td><td colspan="1" rowspan="1"><p>0.8%</p></td></tr><tr><td colspan="1" rowspan="1"><p>6</p></td><td colspan="1" rowspan="1"><p>638</p></td><td colspan="1" rowspan="1"><p>SENTENCE_START</p></td><td colspan="1" rowspan="1"><p>first word token of its sentence</p></td><td colspan="1" rowspan="1"><p>6.9%</p></td></tr><tr><td colspan="1" rowspan="1"><p>7</p></td><td colspan="1" rowspan="1"><p>639</p></td><td colspan="1" rowspan="1"><p>PARAGRAPH_START</p></td><td colspan="1" rowspan="1"><p>first word after a blank line, or of the document</p></td><td colspan="1" rowspan="1"><p>1.1%</p></td></tr><tr><td colspan="1" rowspan="1"><p>8</p></td><td colspan="1" rowspan="1"><p>640</p></td><td colspan="1" rowspan="1"><p>BEFORE_SENTENCE_END</p></td><td colspan="1" rowspan="1"><p>last word token of its sentence</p></td><td colspan="1" rowspan="1"><p>5.0%</p></td></tr></tbody></table><p>Why these nine and not others? Each is a cheap surface property that correlates with importance in a way the hashes cannot express. <code>CAPITALIZED</code> catches proper nouns without a named-entity recognizer. <code>ALL_CAPS</code> catches acronyms and shouting. <code>HAS_DIGIT</code> and <code>ALL_DIGITS</code> catch quantities, which are almost always facts worth keeping. <code>HAS_HYPHEN</code> catches compounds like <em>exposure-response</em>. The three positional flags catch structure — a sentence's first and last words carry more than its middle.</p><p>Note that <code>CAPITALIZED</code> and <code>ALL_CAPS</code> are defined to be <em>mutually exclusive</em> — "not all-caps" is part of the first definition. That is the reason the theoretical maximum is 18 rows rather than 19: a token can never set all nine.</p><p>The important thing about the second group is that the nine are <strong>independent</strong>. A word can be all-caps <em>and</em> contain a digit <em>and</em> contain a hyphen <em>and</em> start a sentence, all at once, and each of those contributes separately. That is why they cannot be collapsed into a single field: encoding nine independent booleans as one value would need a row for each of the 2⁹ = 512 combinations, whereas one row per property costs nine.</p><p>This is also the real reason the embedding <strong>sums</strong> rather than concatenates. Summing accepts a variable-length set of rows without caring how many there are; concatenation would need a fixed slot for every possible feature, nearly all of them empty.</p><p>Measured on real tokens:</p><pre><code>'criticality'   10 rows  =  10 always-on + <b>0 flags</b>
+' ' (a space)    3 rows  =   3 always-on + <b>0 flags</b>   <span class="c">(7 are word-only)</span>
+'NASA'          13 rows  =  10 always-on + <b>3 flags</b>
+                            ALL_CAPS, SENTENCE_START, PARAGRAPH_START
+'CIFAR-10'      15 rows  =  10 always-on + <b>5 flags</b>
+                            ALL_CAPS, HAS_DIGIT, HAS_HYPHEN,
+                            SENTENCE_START, PARAGRAPH_START
+
+across 46,517 real words:   76.3% have <b>no</b> flags set at all — exactly 10 rows
+                            15.2% have one,  6.9% two,  1.6% three or more</code></pre><h3>Where the table comes from: it is learned</h3><p>This is worth stating plainly because it is easy to assume otherwise. Nobody writes the contents of that table. All 737 × 32 = 23,584 numbers start as random noise and are adjusted by training, exactly like every other parameter in the model.</p><p>What is <em>designed</em> is the structure — which field owns which rows. What is <em>learned</em> is what those rows contain. Row 153 holds whatever turned out to be useful, and no human ever looked at it.</p><h3>Why this is smaller: combinations, not compression</h3><p>Here is the actual saving, and it is not a compression trick.</p><p>A vocabulary stores <strong>one row per word</strong>. 30,000 words, 30,000 rows, and a word you never saw during training has no row at all. This scheme stores <strong>one row per feature value</strong>, and a word is a <em>combination</em> of them. The two 8-bit hashes alone give 256 × 256 = <strong>65,536 distinct identities</strong> from 512 rows.</p><p><code>criticality</code> is not "row 153". It is "the sum of rows 0, 153, 348, 579, 591, 616, 650, 673, 705 and 721", and that particular ten-way combination is effectively unique to it. The table is small because it stores <em>properties</em>, while the words live in the combinatorics.</p><div class="callout">
+        <span class="tag">What does row 153 actually mean?</span>
+        <p>
+          Nothing you could read. Row 153 is shared by every word whose hash A happens to be
+          145 — <code>criticality</code> and a scattering of unrelated words that collide there.
+          It is an arbitrary group, and the model simply learns whatever is worth storing for
+          that group.
+        </p>
+        <p>
+          Those colliding words almost certainly differ on hash B, on length, on suffix. So the
+          <em>sum</em> still separates them. Identity lives in the combination, never in any one
+          row — which is also why summing is safe rather than lossy in practice.
+        </p>
+      </div><p>One more consequence worth noticing: because nothing here is a word lookup, a word the model has <strong>never seen still gets a sensible vector</strong>. It has a length, a suffix, a capitalization pattern, a position. That is the property the section on results comes back to — and also, as it turns out, the property that eventually limits how good this model can get.</p><figure>
+        <p class="fig-label">Figure 5 — One word becomes ten row numbers</p>
+        <svg viewBox="0 0 680 290" role="img" aria-label="Feature bag embedding">
+          <text class="t-title" x="4" y="16">"criticality"</text>
+          <text class="t-small" x="96" y="16">— in "The reactor achieved criticality on Tuesday"</text>
+          <g>
+            <text class="t-tiny" x="4" y="38">FIELD</text>
+            <text class="t-tiny" x="176" y="38">VALUE</text><text class="t-tiny" x="214" y="38">+</text>
+            <text class="t-tiny" x="246" y="38">BLOCK</text><text class="t-tiny" x="330" y="38">=</text>
+            <text class="t-tiny" x="360" y="38">ROW</text>
+          </g>
+          <g>
+            <g><text class="t-small" x="4" y="56">token class</text><text class="t-small" x="176" y="56">WORD</text><text class="t-small" x="246" y="56">0–7</text><text class="t-small" x="360" y="56">0</text></g>
+            <g><text class="t-small" x="4" y="74">hash A (FNV-1a)</text><text class="t-small" x="176" y="74">145</text><text class="t-small" x="246" y="74">8–263</text><text class="t-small" x="360" y="74">153</text></g>
+            <g><text class="t-small" x="4" y="92">hash B</text><text class="t-small" x="176" y="92">84</text><text class="t-small" x="246" y="92">264–519</text><text class="t-small" x="360" y="92">348</text></g>
+            <g><text class="t-small" x="4" y="110">suffix hash "ity"</text><text class="t-small" x="176" y="110">59</text><text class="t-small" x="246" y="110">520–583</text><text class="t-small" x="360" y="110">579</text></g>
+            <g><text class="t-small" x="4" y="128">prefix hash "cri"</text><text class="t-small" x="176" y="128">7</text><text class="t-small" x="246" y="128">584–615</text><text class="t-small" x="360" y="128">591</text></g>
+            <g><text class="t-small" x="4" y="146">stopword bucket</text><text class="t-small" x="176" y="146">0 (none)</text><text class="t-small" x="246" y="146">616–631</text><text class="t-small" x="360" y="146">616</text></g>
+            <g><text class="t-small" x="4" y="164">length bucket</text><text class="t-small" x="176" y="164">9</text><text class="t-small" x="246" y="164">641–656</text><text class="t-small" x="360" y="164">650</text></g>
+            <g><text class="t-small" x="4" y="182">sentence position</text><text class="t-small" x="176" y="182">16</text><text class="t-small" x="246" y="182">657–688</text><text class="t-small" x="360" y="182">673</text></g>
+            <g><text class="t-small" x="4" y="200">document position</text><text class="t-small" x="176" y="200">16</text><text class="t-small" x="246" y="200">689–720</text><text class="t-small" x="360" y="200">705</text></g>
+            <g><text class="t-small" x="4" y="218">in-doc frequency</text><text class="t-small" x="176" y="218">0</text><text class="t-small" x="246" y="218">721–736</text><text class="t-small" x="360" y="218">721</text></g>
+          </g>
+          <path class="edge" d="M400 48 Q416 48 416 62 L416 122 Q416 133 428 133 Q416 133 416 144 L416 205 Q416 218 400 218"></path>
+          <text class="t-title" x="440" y="130">Σ</text>
+          <rect class="box-hi" x="470" y="112" width="200" height="36" rx="6"></rect>
+          <text class="t-small" x="570" y="135" text-anchor="middle">one 32-dim vector</text>
+          <text class="t-tiny" x="470" y="166">row = block offset + field value</text>
+          <text class="t-tiny" x="470" y="180">summed, not concatenated: stays 32 wide</text>
+          <line x1="4" y1="244" x2="676" y2="244" stroke="#e4e0d6"></line>
+          <text class="t-small" x="4" y="262">These 10 features always apply to a word. Nine more — the flags — add a row each when true:</text>
+          <text class="t-small" x="4" y="276">"criticality" has none set, so it stops at 10. "NASA" would add three.</text>
+        </svg>
+        <figcaption>
+          Ten rows for this word, because none of its nine flags happen to be set. A non-word
+          token — a space, a comma — selects only three rows and <b>skips the head
+          entirely</b>: punctuation costs almost nothing to process, which is most of why the
+          thing is fast.
+        </figcaption>
+      </figure><h3>Why summing works</h3><p>Summing looks lossy — you cannot recover the ten indices from the sum. But you do not need to. What matters is that words sharing features land near each other in the 32-dimensional space. Two words with the same suffix share a row, so they are pulled together along whatever directions that row occupies. The model learns to spread the rows out so the sums stay distinguishable where it matters.</p><h3>The implementation detail: squaring off R</h3><p>Everything above is the idea, and the idea is complete: features in, one row each, summed. What follows is plumbing — necessary, but carrying no meaning.</p><p>A tensor cannot be ragged. Every row of <code>rows</code> has to be the same length, so <code>R</code> has to become a fixed number. We pick <strong>20</strong> and fill the unused slots with a special index whose row is permanently zero, contributing nothing to the sum.</p><pre><code><b>19</b>  features that could possibly apply
+<b>18</b>  the most that can fire at once — CAPITALIZED and ALL_CAPS are
+    mutually exclusive, so never all nine flags
+<b>15</b>  the most ever seen across ~400,000 real tokens ("CIFAR-10")
+<b>20</b>  the array width we chose: 18 rounded up, with headroom</code></pre><p>So 19 is a fact about the design and 18 is a fact about the features, but <strong>20 is only a choice</strong> — a round number above the worst case, picked so that adding a feature later does not change the tensor shape. It has no meaning beyond "big enough". For a typical word, ten of the twenty slots are empty, and that waste buys uniform shapes, which is what makes the arithmetic fast.</p><p>Here is the actual embedding code. It is three lines:</p><p class="filename">salience/train/model.py</p><pre><code><span class="k">def</span> embed(self, rows: torch.Tensor) -&gt; torch.Tensor:
+    <span class="s">"""Feature bag: sum the rows each token selects.</span><span class="s">
+    (B, T, R) -&gt; (B, T, D)
+    """</span>
+    <span class="k">return</span> self.emb(rows).sum(dim=2)</code></pre><p><code>rows</code> has shape <code>(B, T, 20)</code> — the padded list of row numbers for each token. <code>self.emb(rows)</code> looks each one up, producing <code>(B, T, 20, 32)</code>. Then <code>.sum(dim=2)</code> collapses the twenty-row dimension, giving <code>(B, T, 32)</code>. Tokens that select fewer than twenty rows are padded with a special index whose row is permanently zero, so the extra terms add nothing.</p><div class="define">
+        <span class="term">dim=2</span>
+        <p>
+          Which axis to collapse, counting from zero. Shape <code>(B, T, 20, 32)</code> has
+          axis 0 = B, axis 1 = T, axis 2 = the twenty rows, axis 3 = the 32 features. Summing
+          over axis 2 leaves <code>(B, T, 32)</code>. Getting these indices wrong is the single
+          most common bug in this kind of code, which is why every function here documents its
+          shapes.
+        </p>
+      </div><div class="budget">
+        <span class="tag">Parameter budget · after section 06</span>
+        <dl>
+          <div class="now"><dt>embedding table · 737 rows × 32</dt><dd>23,584</dd></div>
+        </dl>
+        <div class="meter"><span style="width:60%"></span></div>
+        <div class="foot"><span>running total</span><span><b>23,584</b> of 39,361 · 60%</span></div>
+      </div><h2 id="s7"><span class="num">07</span>The local window</h2><p>After embedding, each token knows about itself and nothing else. The word "lock" has the same vector whether it is a migration lock or a bicycle lock. The next stage gives each token a peek at its neighbours.</p><h3>What the stage computes</h3><p>The whole operation, for the token at position <code>t</code>, is this:</p><pre><code>local[t] = tanh(  bias
+                + w₋₂ ⊙ emb[t-2]      <span class="c">two to the left</span>
+                + w₋₁ ⊙ emb[t-1]
+                + w₀  ⊙ emb[t]        <span class="c">itself</span>
+                + w₊₁ ⊙ emb[t+1]
+                + w₊₂ ⊙ emb[t+2]      <span class="c">two to the right</span>
+                + v₁  ⊙ emb[first word of this sentence]
+                + v₂  ⊙ emb[last word of previous sentence] )</code></pre><p>Eight vectors of 32 numbers, blended together and squashed. The <code>⊙</code> is an elementwise multiply, explained in a moment.</p><h3>The weights are learned, exactly like the embedding table</h3><p>This is the part worth being explicit about. <strong>Nobody maintains these windows and nobody writes those weights.</strong> The seven <code>w</code> and <code>v</code> vectors, plus the bias, are parameters in precisely the same sense as the 737-row embedding table: they start as random noise and are moved by gradient descent.</p><pre><code>local_bias   (32,)      32 parameters
+local_win    (5, 32)   160 parameters   <span class="c">one 32-vector per window position</span>
+local_ptr    (2, 32)    64 parameters   <span class="c">one 32-vector per pointer</span>
+                       ───
+                       256 parameters   <span class="c">0.65% of the model</span></code></pre><p>The key property is that a window weight is tied to a <em>relative position</em>, not to a token. There is exactly one <code>w₋₂</code> in the whole model, and it means "how should the thing two places to my left influence me". It is learned once from all 10,000 training paragraphs and then applied at every position of every document. The window does not belong to any token — it is a rule about neighbourhoods.</p><h3>What it actually learned</h3><p>Because there are only eight of them, we can simply look. Here is the RMS magnitude of each learned vector in the shipped model — how loudly each position gets to speak:</p><pre><code>t-2   two left                 0.498  ##########################
+t-1   one left                 0.545  ############################
+t     itself                   0.796  ########################################
+t+1   one right                0.660  #################################
+t+2   two right                0.349  ##################
+
+ptr   first word of sentence   0.110  ######
+ptr   last word of prev sent   0.105  #####
+
+bias                           0.070</code></pre><p>Nobody specified that shape. The model decided a token should listen to itself most, then to its immediate neighbours, then less to those further out — a <strong>2.3× falloff from centre to two-away</strong>. It also weighted the word to the <em>right</em> above the word to the left, which is a reasonable thing to learn about English, where a noun is qualified by what follows it.</p><div class="callout">
+        <span class="tag">The pointers are barely used</span>
+        <p>
+          Look at the bottom two rows: 0.11 against 0.80 for the centre. The model learned to
+          largely <em>ignore</em> the pointer mechanism we inherited from gpu-lexer.
+        </p>
+        <p>
+          That is consistent with the sweep in Part five, where widening the window from ±2 to
+          ±4 also made no difference. Both say the same thing: for prose salience the useful
+          local signal lives in the immediate neighbours, and everything beyond that is better
+          handled by the scan. In a second version of this architecture the pointers would be a
+          candidate for deletion.
+        </p>
+      </div><h3>The code</h3><p class="filename">salience/train/model.py</p><pre><code><span class="k">def</span> local(self, emb, ptrs):
+    b, t, _ = emb.shape
+    half = (self.config.window - 1) // 2          <span class="c"># window=5 → half=2</span>
+
+    out = self.local_bias.expand(b, t, d).clone()
+    padded = F.pad(emb, (0, 0, half, half))       <span class="c"># 2 zero tokens each end</span>
+    <span class="k">for</span> k <span class="k">in</span> range(self.config.window):
+        out = out + self.local_win[k] * padded[:, k : k + t]
+
+    <span class="k">for</span> p <span class="k">in</span> range(self.config.ptrs):
+        idx = ptrs[:, :, p]
+        valid = (idx &gt;= 0).unsqueeze(-1)
+        gathered = _gather_seq(emb, idx.clamp(min=0))
+        out = out + self.local_ptr[p] * torch.where(valid, gathered, zeros)
+
+    <span class="k">return</span> torch.tanh(out)</code></pre><p>The loop is a sliding window done without a loop over positions. Padding the sequence with two zero tokens at each end means <code>padded[:, k : k + t]</code> is the whole sequence shifted by <code>k − 2</code> positions. So <code>k=0</code> gives every token's neighbour two to the left, <code>k=2</code> gives the token itself, <code>k=4</code> gives two to the right. Five shifted copies, each scaled by its own learned weight vector, added together.</p><div class="define">
+        <span class="term">Elementwise multiply</span>
+        <p>
+          <code>self.local_win[k]</code> is 32 numbers, and it multiplies a
+          <code>(B, T, 32)</code> tensor. This is not a matrix multiply — feature 0 is scaled
+          by weight 0, feature 1 by weight 1, and so on, independently. It costs 32 parameters
+          per window position instead of 32×32 = 1,024. Cheap, and it turns out to be enough.
+        </p>
+      </div><p>The second loop handles the pointers. <code>ptrs</code> carries two token indices per position — the first word of the current sentence and the last word of the previous one — or <code>-1</code> where there is none, which the <code>torch.where</code> turns into a zero contribution. gpu-lexer used the same mechanism pointing at line starts and matched delimiters.</p><div class="define">
+        <span class="term">tanh</span>
+        <p>
+          A squashing function. Takes any number and returns something between −1 and +1,
+          smoothly, with zero mapping to zero. Without something like this, stacking layers
+          would be pointless — a chain of additions and multiplications collapses into a single
+          linear operation no matter how many you stack. The squash is what makes depth mean
+          anything.
+        </p>
+      </div><div class="budget">
+        <span class="tag">Parameter budget · after section 07</span>
+        <dl>
+          <div><dt>embedding table</dt><dd>23,584</dd></div>
+          <div class="now"><dt>local window · bias 32 + window 160 + pointers 64</dt><dd>256</dd></div>
+        </dl>
+        <div class="meter"><span style="width:61%"></span></div>
+        <div class="foot"><span>running total</span><span><b>23,840</b> of 39,361 · 61%</span></div>
+      </div><h2 id="s8"><span class="num">08</span>Whole-document context without attention</h2><p>A five-token window is not enough. Whether a word matters depends on the entire paragraph. Attention solves this and costs <code>O(n²)</code> comparisons and a lot of parameters. What else is there?</p><p>gpu-lexer's answer is a <strong>learned parallel prefix scan</strong>. Start with the idea of running state through the sequence:</p><pre><code>state = 0
+<span class="k">for</span> each token i:
+    state = z[i] * state + w[i]
+    output[i] = state
+
+<span class="k">where</span>   c[i] = what token i proposes the state should become
+        z[i] = how much of the <b>old</b> state to keep  (0 … 1)
+        w[i] = (1 - z[i]) * c[i]   <span class="c">← what actually gets written</span></code></pre><p>This is a minimal recurrent network. <code>state</code> is a running summary of the paragraph so far, and every token gets to modify it: keep some of what was there, overwrite the rest with its own proposal. After the loop, <code>output[i]</code> summarizes everything up to position <code>i</code>.</p><p>Substituting <code>w</code> back in shows what the update really is — a weighted average whose two weights sum to 1:</p><pre><code>state = z · state  +  (1 − z) · c
+        └─ keep ─┘     └─ overwrite ─┘
+
+        z = 0.9  →  keep 90% of the old state, accept 10% of the proposal
+        z = 0.1  →  keep 10%, accept 90% — effectively a reset</code></pre><p>That is why the state can never grow without bound: nothing is ever simply added, only blended. <code>w</code> exists as a separate name purely because the scan machinery in the next section wants a single additive term — it is <code>(1 − z) · c</code> precomputed once per token, not a third idea.</p><h3>Where z and c come from</h3><p>The loop above still treats <code>z</code> and <code>c</code> as though they arrive from nowhere. They do not, and this is the step that was missing.</p><p><strong>They are computed, per token, from that token's local vector.</strong> Two small learned layers do it — and those layers, not <code>z</code> and <code>c</code> themselves, are the parameters:</p><p class="filename">salience/train/model.py</p><pre><code><span class="k">class</span> ScanBlock(nn.Module):
+    <span class="k">def</span> __init__(self, d):
+        self.wz = nn.Linear(d, d)   <span class="c"># -&gt; z, the update gate   1,056 params</span>
+        self.wc = nn.Linear(d, d)   <span class="c"># -&gt; c, the candidate     1,056 params</span>
+
+    <span class="k">def</span> forward(self, h, lengths):
+        z         = torch.sigmoid(self.wz(h))   <span class="c"># (B,T,32), each in 0…1</span>
+        candidate = torch.tanh(self.wc(h))      <span class="c"># (B,T,32), each in -1…1</span>
+        w         = (1 - z) * candidate
+        <span class="k">return</span> blelloch_scan(z, w, self.up, self.down)</code></pre><p>The two names come straight from the GRU literature, and neither letter is arbitrary. <code>wz</code> is the projection that produces <strong>z, the update gate</strong>. <code>wc</code> is the projection that produces <strong>c, the candidate</strong>.</p><div class="define">
+        <span class="term">Gate and candidate</span>
+        <p>
+          <strong>c, the candidate</strong>, is what this token would like the running state to
+          become — its proposal, computed from its own features alone, ignoring history.
+        </p>
+        <p>
+          <strong>z, the update gate</strong>, decides how much of that proposal is accepted. It
+          is 32 independent knobs, one per channel. Near 1: "keep the old state, ignore the
+          proposal." Near 0: "throw the old state away and take the proposal instead."
+        </p>
+      </div><p>So <code>z</code>, <code>c</code> and <code>w</code> are not parameters. They are recomputed for every token of every paragraph. The things actually being <em>learned</em> are the two matrices <code>wz</code> and <code>wc</code> — learned once, applied everywhere, exactly like the window weights in section 7.</p><h3>What the gates learned</h3><p>Averaging <code>z</code> over 78,711 real tokens, channel by channel, shows something nobody designed. A gate of <code>z</code> means influence decays by a factor of <code>z</code> per token, so <code>log(0.5)/log(z)</code> is the number of tokens until a contribution has faded by half — an effective memory length:</p><pre><code>channel    mean z   half-life   <span class="c">(tokens until influence halves)</span>
+5           0.450         0.9    <span class="c">← forgets almost immediately</span>
+3           0.460         0.9
+30          0.517         1.1
+…
+2           0.822         3.5
+9           0.823         3.6
+…
+26          0.930         9.5
+28          0.937        10.6
+27          0.986        50.5
+29          0.990        67.4    <span class="c">← remembers the whole paragraph</span></code></pre><p>The 32 channels spread themselves across a <strong>78× range of memory lengths</strong>. Some forget within a single token. Others hold on for 67, which is most of a paragraph.</p><p>That is the model solving a problem it was never told about. Whether a word matters depends on both the immediate phrase and the overall topic, and with 32 independent channels it can track both at once: fast channels carry what just happened, slow channels carry what the paragraph is about. Nothing in the architecture asked for a range of timescales — it simply turned out to be the useful thing to learn.</p><h3>The problem with the loop</h3><p>Back to the recurrence. The trouble is the word <code>for</code>. Token 200 cannot be computed until token 199 is done, because it needs the state token 199 produced. On a 256-token paragraph that is 256 strictly sequential steps, and a GPU — thousands of cores sitting idle waiting their turn — hates it.</p><p>Note that <code>z</code> and <code>w</code> are <em>not</em> the bottleneck. Every token's <code>z</code> and <code>w</code> can be computed simultaneously, because each depends only on that token's own local vector. It is purely the accumulation of <code>state</code> that is serial — and that distinction is what the next trick exploits.</p><h3>Blelloch's trick</h3><p>The recurrence has a property that rescues it. Two consecutive steps can be <em>collapsed into one</em>. If step A is <code>(z_A, w_A)</code> and step B is <code>(z_B, w_B)</code>, then doing A then B is the same as doing a single combined step:</p><pre><code>combined_z = z_A · z_B
+combined_w = w_B + z_B · w_A</code></pre><p>Because pairs can be merged, you can merge them in a tree instead of a chain. That is what Blelloch's algorithm does, in two passes: an <strong>up-sweep</strong> that merges pairs, then pairs of pairs, then pairs of those, building partial totals up a binary tree; and a <strong>down-sweep</strong> that pushes the accumulated prefixes back down.</p><div class="worked">
+        <span class="tag">Worked example — four tokens</span>
+        <p>
+          Say the four steps are <code>(z,w)</code> = (0.5, 2), (0.5, 4), (0.5, 6), (0.5, 8).
+          The sequential loop gives states 2, 5, 8.5, 12.25.
+        </p>
+        <p>
+          The tree does it in two levels instead of four steps. Up-sweep merges (1,2) and (3,4):
+          the first pair becomes <code>z = 0.25, w = 4 + 0.5·2 = 5</code>. Down-sweep then hands
+          that merged total to the right half as its starting prefix, so tokens 3 and 4 do not
+          wait for tokens 1 and 2 to finish — they wait only for the <em>merge</em>.
+        </p>
+        <p>
+          Four tokens: 2 levels instead of 4 steps. 256 tokens: <strong>8 levels instead of
+          256 steps</strong>. 4,096 tokens: 12 levels. The depth grows logarithmically, and
+          every merge within a level happens simultaneously.
+        </p>
+      </div><figure>
+        <p class="fig-label">Figure 6 — Blelloch scan over 8 tokens</p>
+        <svg viewBox="0 0 680 270" role="img" aria-label="Blelloch up-sweep and down-sweep">
+          <text class="t-title" x="4" y="14">up-sweep — build subtree totals</text>
+          <text class="t-title" x="360" y="14">down-sweep — push prefixes back down</text>
+          <g>
+            <path class="edge-hi" d="M20 196 L40 156 M60 196 L40 156"></path>
+            <path class="edge-hi" d="M100 196 L120 156 M140 196 L120 156"></path>
+            <path class="edge-hi" d="M180 196 L200 156 M220 196 L200 156"></path>
+            <path class="edge-hi" d="M260 196 L280 156 M300 196 L280 156"></path>
+            <path class="edge-hi" d="M40 156 L80 112 M120 156 L80 112"></path>
+            <path class="edge-hi" d="M200 156 L240 112 M280 156 L240 112"></path>
+            <path class="edge-hi" d="M80 112 L160 68 M240 112 L160 68"></path>
+            <g>
+              <circle class="box-hi" cx="20" cy="196" r="7"></circle><circle class="box-hi" cx="60" cy="196" r="7"></circle>
+              <circle class="box-hi" cx="100" cy="196" r="7"></circle><circle class="box-hi" cx="140" cy="196" r="7"></circle>
+              <circle class="box-hi" cx="180" cy="196" r="7"></circle><circle class="box-hi" cx="220" cy="196" r="7"></circle>
+              <circle class="box-hi" cx="260" cy="196" r="7"></circle><circle class="box-hi" cx="300" cy="196" r="7"></circle>
+            </g>
+            <g>
+              <circle class="box" cx="40" cy="156" r="7"></circle><circle class="box" cx="120" cy="156" r="7"></circle>
+              <circle class="box" cx="200" cy="156" r="7"></circle><circle class="box" cx="280" cy="156" r="7"></circle>
+            </g>
+            <circle class="box" cx="80" cy="112" r="7"></circle><circle class="box" cx="240" cy="112" r="7"></circle>
+            <circle class="box" cx="160" cy="68" r="7"></circle>
+            <text class="t-tiny" x="316" y="199">level 0</text>
+            <text class="t-tiny" x="316" y="159">level 1</text>
+            <text class="t-tiny" x="316" y="115">level 2</text>
+            <text class="t-tiny" x="316" y="71">level 3</text>
+            <text class="t-tiny" x="4" y="220">tokens</text>
+            <text class="t-tiny" x="4" y="234">↑ each level has its own 32 parameters</text>
+          </g>
+          <line x1="340" y1="24" x2="340" y2="244" stroke="#e4e0d6" stroke-dasharray="3 4"></line>
+          <g transform="translate(350,0)">
+            <path class="edge" d="M160 68 L80 112 M160 68 L240 112"></path>
+            <path class="edge" d="M80 112 L40 156 M80 112 L120 156"></path>
+            <path class="edge" d="M240 112 L200 156 M240 112 L280 156"></path>
+            <path class="edge" d="M40 156 L20 196 M40 156 L60 196"></path>
+            <path class="edge" d="M120 156 L100 196 M120 156 L140 196"></path>
+            <path class="edge" d="M200 156 L180 196 M200 156 L220 196"></path>
+            <path class="edge" d="M280 156 L260 196 M280 156 L300 196"></path>
+            <g>
+              <circle class="box-cool" cx="20" cy="196" r="7"></circle><circle class="box-cool" cx="60" cy="196" r="7"></circle>
+              <circle class="box-cool" cx="100" cy="196" r="7"></circle><circle class="box-cool" cx="140" cy="196" r="7"></circle>
+              <circle class="box-cool" cx="180" cy="196" r="7"></circle><circle class="box-cool" cx="220" cy="196" r="7"></circle>
+              <circle class="box-cool" cx="260" cy="196" r="7"></circle><circle class="box-cool" cx="300" cy="196" r="7"></circle>
+            </g>
+            <g>
+              <circle class="box" cx="40" cy="156" r="7"></circle><circle class="box" cx="120" cy="156" r="7"></circle>
+              <circle class="box" cx="200" cy="156" r="7"></circle><circle class="box" cx="280" cy="156" r="7"></circle>
+            </g>
+            <circle class="box" cx="80" cy="112" r="7"></circle><circle class="box" cx="240" cy="112" r="7"></circle>
+            <circle class="box" cx="160" cy="68" r="7"></circle>
+            <text class="t-tiny" x="4" y="220">every token now sees everything before it</text>
+            <text class="t-tiny" x="4" y="234">3 levels for 8 tokens · 9 for 512</text>
+          </g>
+          <line x1="4" y1="252" x2="676" y2="252" stroke="#e4e0d6"></line>
+          <text class="t-small" x="4" y="266">combine(A, B) → z = z_A·z_B,  w = w_B + z_B·w_A·g_level</text>
+        </svg>
+        <figcaption>
+          The detail that matters: <b>each level of the tree has its own learned parameters</b>
+          (<code>g_level</code>). That single design choice has a consequence which took us a
+          while to appreciate.
+        </figcaption>
+      </figure><p>Here is the up-sweep, which is the whole algorithm in eight lines:</p><p class="filename">salience/train/scan.py</p><pre><code>tree_z, tree_w = [z], [w]
+<span class="k">for</span> level <span class="k">in</span> range(levels):
+    cz, cw = tree_z[level], tree_w[level]
+    g = torch.sigmoid(up[min(level, LEVELS - 1)])
+    <span class="c"># 0::2 = every left child, 1::2 = every right child</span>
+    pz, pw = _combine(cz[:, 0::2], cw[:, 0::2],
+                      cz[:, 1::2], cw[:, 1::2], g)
+    tree_z.append(pz)
+    tree_w.append(pw)</code></pre><p><code>cz[:, 0::2]</code> is "every other element starting at 0" — all the left children at once. <code>cz[:, 1::2]</code> is all the right children. One call to <code>_combine</code> merges every pair at this level simultaneously. The loop runs <code>log₂(T)</code> times, not <code>T</code> times.</p><h3>The trap: this scan is not associative</h3><p>A prefix scan is parallelizable because its operator is associative — you can group the terms however you like and get the same answer. But gpu-lexer attaches a <em>different learned parameter to each level of the tree</em>. The moment you do that, the guarantee evaporates. The computation is no longer "the prefix scan of this sequence". It is <strong>this specific balanced binary tree, evaluated in this specific order</strong>.</p><figure>
+        <p class="fig-label">Figure 7 — Same inputs, two different answers</p>
+        <svg viewBox="0 0 680 190" role="img" aria-label="Sequential versus balanced tree">
+          <text class="t-title" x="4" y="14">sequential loop — right-leaning</text>
+          <text class="t-title" x="360" y="14">Blelloch — balanced</text>
+          <g>
+            <path class="edge-dead" d="M20 150 L44 122 M68 150 L44 122 M44 122 L68 96 M116 150 L68 96 M68 96 L92 70 M164 150 L92 70 M92 70 L116 44 M212 150 L116 44"></path>
+            <g>
+              <circle class="box-hi" cx="20" cy="150" r="6"></circle><circle class="box-hi" cx="68" cy="150" r="6"></circle>
+              <circle class="box-hi" cx="116" cy="150" r="6"></circle><circle class="box-hi" cx="164" cy="150" r="6"></circle>
+              <circle class="box-hi" cx="212" cy="150" r="6"></circle>
+            </g>
+            <circle class="box" cx="44" cy="122" r="6"></circle><circle class="box" cx="68" cy="96" r="6"></circle>
+            <circle class="box" cx="92" cy="70" r="6"></circle><circle class="box" cx="116" cy="44" r="6"></circle>
+            <text class="t-tiny" x="240" y="72">depth = n</text>
+            <text class="t-tiny" x="240" y="86">levels 0,1,2,3,4…</text>
+            <text class="t-tiny" x="240" y="100">params applied in a chain</text>
+          </g>
+          <line x1="340" y1="24" x2="340" y2="164" stroke="#e4e0d6" stroke-dasharray="3 4"></line>
+          <g transform="translate(360,0)">
+            <path class="edge-hi" d="M20 150 L44 112 M68 150 L44 112 M116 150 L140 112 M164 150 L140 112 M44 112 L92 66 M140 112 L92 66"></path>
+            <g>
+              <circle class="box-hi" cx="20" cy="150" r="6"></circle><circle class="box-hi" cx="68" cy="150" r="6"></circle>
+              <circle class="box-hi" cx="116" cy="150" r="6"></circle><circle class="box-hi" cx="164" cy="150" r="6"></circle>
+            </g>
+            <circle class="box" cx="44" cy="112" r="6"></circle><circle class="box" cx="140" cy="112" r="6"></circle>
+            <circle class="box" cx="92" cy="66" r="6"></circle>
+            <text class="t-tiny" x="196" y="72">depth = log₂ n</text>
+            <text class="t-tiny" x="196" y="86">level 0 twice, then level 1</text>
+            <text class="t-tiny" x="196" y="100">different grouping →</text>
+            <text class="t-tiny" x="196" y="114">different result</text>
+          </g>
+          <line x1="4" y1="174" x2="676" y2="174" stroke="#e4e0d6"></line>
+          <text class="t-small" x="4" y="188">With per-level parameters, the tree shape is part of the model definition.</text>
+        </svg>
+        <figcaption>
+          This rules out every convenient shortcut: <code>torch.associative_scan</code>, the
+          Heinsen / minGRU <code>cumsum</code> trick, and a plain sequential loop as a
+          "reference implementation". All three compute something reasonable. None computes
+          <em>this</em>.
+        </figcaption>
+      </figure><p>It also means padding is load-bearing. Tree depth is <code>log₂</code> of the padded length, so a 90-token paragraph padded to 128 gives different numbers than the same paragraph padded to 256. If we batched by raw length, a paragraph's prediction would depend on which other paragraphs happened to share its batch — and training would not match inference. The dataloader therefore groups paragraphs so that every item in a batch has the same <code>next_pow2(length)</code>:</p><p class="filename">salience/train/data.py</p><pre><code><span class="k">def</span> bucket_batches(examples, batch_size, shuffle, seed=0):
+    <span class="s">"""Group into batches that never cross a next_pow2 boundary."""</span>
+    buckets = {}
+    <span class="k">for</span> ex <span class="k">in</span> examples:
+        buckets.setdefault(next_pow2(ex.length), []).append(ex)
+    <span class="c"># ... then batch within each bucket, never across</span></code></pre><p>Paragraphs of 40–130 words land in only three buckets — 128, 256 and 512 padded tokens — so this costs almost nothing in batching efficiency and removes an entire class of silent bug.</p><h3>Both directions</h3><p>A prefix scan only looks left. For syntax highlighting that is mostly fine. For prose it is not: whether a word matters often depends on how the sentence ends. So we run the scan twice — once forward, once over the reversed sequence — and concatenate. That is the one place our architecture deliberately departs from gpu-lexer's.</p><pre><code>gf = self.fwd(local, lengths)                              <span class="c"># left context</span>
+
+rev = _reverse_index(local.shape[1], lengths)
+gb = _gather_seq(self.bwd(_gather_seq(local, rev), lengths), rev)</code></pre><p><code>_reverse_index</code> is fiddlier than it looks. You cannot simply flip the tensor, because that would drag the padding from the end into the middle of the sequence, where the scan's guarantees no longer hold. It reverses only the real tokens and leaves the padded tail alone — and because that mapping is its own inverse, the same index tensor un-reverses the result.</p><div class="budget">
+        <span class="tag">Parameter budget · after section 08</span>
+        <dl>
+          <div><dt>embedding table</dt><dd>23,584</dd></div>
+          <div><dt>local window</dt><dd>256</dd></div>
+          <div class="now"><dt>scan · 2 dirs × (wz 1,056 + wc 1,056 + up 384 + down 384)</dt><dd>5,760</dd></div>
+        </dl>
+        <div class="meter"><span style="width:75%"></span></div>
+        <div class="foot"><span>running total</span><span><b>29,600</b> of 39,361 · 75%</span></div>
+      </div><h2 id="s9"><span class="num">09</span>The head, and what a logit is</h2><p>By now every token has three 32-number vectors: what it is locally, what came before, what comes after. The head turns those 96 numbers into one.</p><pre><code>x = torch.cat([local, gf, gb], dim=-1)               <span class="c"># (B, T, 96)</span>
+gate = torch.sigmoid(self.head_gate(x))              <span class="c"># (B, T, 16)</span>
+hidden = torch.tanh(self.head_hid(torch.cat([x, gate], dim=-1)))
+<span class="k">return</span> self.head_out(hidden).squeeze(-1)             <span class="c"># (B, T)</span></code></pre><div class="define">
+        <span class="term">Linear layer</span>
+        <p>
+          <code>nn.Linear(96, 16)</code> is a matrix multiply plus an offset: 16 outputs, each
+          a weighted sum of all 96 inputs, plus a bias. That is 96×16 + 16 = 1,552 parameters.
+          It is the basic building block — almost everything else is plumbing around these.
+        </p>
+      </div><p>The middle line is the "gated" part. Sixteen numbers are computed, squashed to 0–1 by sigmoid, and appended to the input before the main hidden layer. It lets the network compute a few cheap summary flags first and condition the rest on them — a poor man's two-layer network for 1,552 parameters.</p><div class="define">
+        <span class="term">Logit</span>
+        <p>
+          The raw, unsquashed output. It can be any number: −4.2, 0.0, 7.9. To turn it into a
+          probability you apply <code>sigmoid</code>, which maps it into 0–1: sigmoid(0) = 0.5,
+          sigmoid(2) ≈ 0.88, sigmoid(−2) ≈ 0.12.
+        </p>
+        <p>
+          Models emit logits rather than probabilities because the loss function is both more
+          accurate and more numerically stable when it does the squashing itself. You will see
+          <code>binary_cross_entropy_with_logits</code> later — the "with_logits" is exactly
+          this.
+        </p>
+      </div><p>One logit per token, squashed to a score in 0–1. For non-word tokens the score is forced to zero and the head is skipped entirely — spaces and commas never reach it.</p><p>That is the complete forward pass. Everything up to here happens identically in TypeScript in your browser, from the same weights.</p><div class="budget">
+        <span class="tag">Parameter budget · after section 09</span>
+        <dl>
+          <div><dt>embedding table</dt><dd>23,584</dd></div>
+          <div><dt>local window</dt><dd>256</dd></div>
+          <div><dt>scan, both directions</dt><dd>5,760</dd></div>
+          <div class="now"><dt>head · gate 1,552 + hidden 8,136 + out 73</dt><dd>9,761</dd></div>
+        </dl>
+        <div class="meter"><span style="width:100%"></span></div>
+        <div class="foot"><span>running total</span><span><b>39,361</b> of 39,361 · 100%</span></div>
+      </div><div class="part-head">
+        <span class="label">Part three</span>
+        <h2>How it learns</h2>
+        <p>
+          Where the right answers come from, and the mechanical process that turns 39,361
+          random numbers into useful ones.
+        </p>
+      </div><h2 id="s10"><span class="num">10</span>Where the answers come from</h2><p>Everything so far was architecture, and architecture was the easy half. To train, you need to know the right answer for thousands of paragraphs. gpu-lexer had an enormous advantage here: <strong>Shiki</strong>, a syntax highlighter that will tell you the correct colour of any token, deterministically, forever, for 75 languages. Their ground truth was a function call.</p><p>"Which words in this paragraph matter" has no Shiki. That is the actual project — the model can never be better than the labels we manufacture.</p><p>We built a corpus of 12,000 paragraphs across five registers (Wikipedia, news, essays, work email, research abstracts), then asked an LLM to mark the minimal set of words preserving meaning. The key move is not asking once but <strong>asking three times and keeping the disagreement</strong>.</p><figure>
+        <p class="fig-label">Figure 8 — Three samples become one graded target</p>
+        <svg viewBox="0 0 680 200" role="img" aria-label="Soft target aggregation">
+          <g>
+            <text class="t-small" x="4" y="26">sample 1</text>
+            <text class="t-small" x="4" y="50">sample 2</text>
+            <text class="t-small" x="4" y="74">sample 3</text>
+            <text class="t-small" x="4" y="112">target</text>
+          </g>
+          <g>
+            <text class="t-small" x="92" y="140" text-anchor="middle">Engineers</text>
+            <text class="t-small" x="212" y="140" text-anchor="middle">did</text>
+            <text class="t-small" x="332" y="140" text-anchor="middle">not</text>
+            <text class="t-small" x="452" y="140" text-anchor="middle">report</text>
+            <text class="t-small" x="572" y="140" text-anchor="middle">any</text>
+          </g>
+          <g>
+            <rect class="box-hi" x="52" y="16" width="80" height="14" rx="3"></rect>
+            <rect class="box-hi" x="292" y="16" width="80" height="14" rx="3"></rect>
+            <rect class="box-hi" x="412" y="16" width="80" height="14" rx="3"></rect>
+            <rect class="box-hi" x="52" y="40" width="80" height="14" rx="3"></rect>
+            <rect class="box-hi" x="292" y="40" width="80" height="14" rx="3"></rect>
+            <rect class="box-hi" x="52" y="64" width="80" height="14" rx="3"></rect>
+            <rect class="box-hi" x="292" y="64" width="80" height="14" rx="3"></rect>
+            <rect class="box-hi" x="412" y="64" width="80" height="14" rx="3"></rect>
+          </g>
+          <g>
+            <rect x="52" y="96" width="80" height="20" rx="3" fill="hsl(22 94% 52% / 0.85)"></rect>
+            <text class="t-tiny" x="92" y="110" text-anchor="middle" fill="#fff">1.00</text>
+            <rect x="172" y="96" width="80" height="20" rx="3" fill="hsl(22 94% 52% / 0.06)" stroke="#e4e0d6"></rect>
+            <text class="t-tiny" x="212" y="110" text-anchor="middle">0.00</text>
+            <rect x="292" y="96" width="80" height="20" rx="3" fill="hsl(22 94% 52% / 0.85)"></rect>
+            <text class="t-tiny" x="332" y="110" text-anchor="middle" fill="#fff">1.00</text>
+            <rect x="412" y="96" width="80" height="20" rx="3" fill="hsl(22 94% 52% / 0.55)"></rect>
+            <text class="t-tiny" x="452" y="110" text-anchor="middle" fill="#fff">0.67</text>
+            <rect x="532" y="96" width="80" height="20" rx="3" fill="hsl(22 94% 52% / 0.06)" stroke="#e4e0d6"></rect>
+            <text class="t-tiny" x="572" y="110" text-anchor="middle">0.00</text>
+          </g>
+          <line x1="4" y1="162" x2="676" y2="162" stroke="#e4e0d6"></line>
+          <text class="t-small" x="4" y="180">Unanimous words are unambiguous. Split words are genuinely borderline — and the model should learn that.</text>
+          <text class="t-small" x="4" y="194">Across 10,000 paragraphs: 15% of words unanimous, 26% partial, 59% never marked.</text>
+        </svg>
+        <figcaption>
+          Sampling at temperature 0.7 and averaging turns a binary judgement into a graded one
+          for free. The disagreement is not noise to be eliminated; it is a measurement of how
+          borderline each word is — and, as we will see in Part five, it also tells us the
+          highest score any model could possibly achieve.
+        </figcaption>
+      </figure><h3>The prompt is the product, and it has limits</h3><p>Three iterations, measured on the same 20 paragraphs:</p><ul><li><p><strong>p1</strong> stated a "15–30% of words" target in prose. The oracle marked a median of <strong>40%</strong>, max 54%, with wild sample-to-sample spread.</p></li><li><p><strong>p2</strong> computed an explicit integer cap per paragraph and stated it: "mark at most 21 of these 85 words". Median dropped to <strong>26%</strong>.</p></li><li><p><strong>p3</strong> added "this is a ceiling, not a target" and lowered the cap. Median went <em>up</em> to <strong>28%</strong>, max 50%. Reverted.</p></li></ul><div class="callout">
+        <span class="tag">Where to stop tuning</span>
+        <p>
+          We stopped at p2, and not just out of impatience. What training needs from the oracle
+          is the <em>ranking</em> of words, not the absolute count — the soft targets already
+          separate a unanimous core from padding each sample picks differently, and the model's
+          own highlight rate is set by a budget term in the loss. Further prompt tuning would
+          have bought something the loss function already controls.
+        </p>
+      </div><h2 id="s11"><span class="num">11</span>What training actually does</h2><p>Here is the part that is hard to get from reading about gradient descent abstractly. Training is a loop. A boring, mechanical loop, and this is all of it:</p><p class="filename">salience/train/run.py</p><pre><code><span class="k">for</span> epoch <span class="k">in</span> range(1, args.epochs + 1):
+    <span class="k">for</span> group <span class="k">in</span> bucket_batches(train_set, batch_size, shuffle=<span class="k">True</span>):
+        batch = collate(group)
+
+        <span class="c"># 1. forward: run the model, get a prediction</span>
+        logits = model(batch[<span class="s">"rows"</span>], batch[<span class="s">"ptrs"</span>],
+                       batch[<span class="s">"lengths"</span>])
+
+        <span class="c"># 2. score it: one number saying how wrong we were</span>
+        loss, parts = compute_loss(logits, batch[<span class="s">"target"</span>],
+                                   batch[<span class="s">"is_word"</span>], weights)
+
+        <span class="c"># 3. clear last step's gradients</span>
+        opt.zero_grad(set_to_none=<span class="k">True</span>)
+
+        <span class="c"># 4. backward: which way should each of the 39,361 numbers move?</span>
+        loss.backward()
+
+        <span class="c"># 5. don't let any single step be enormous</span>
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        <span class="c"># 6. take the step</span>
+        opt.step()
+        sched.step()</code></pre><p>Six lines, repeated. Let us take them one at a time.</p><div class="define">
+        <span class="term">Epoch</span>
+        <p>
+          One complete pass over the training data. We train for 40. The data is reshuffled
+          each time so the model does not learn the order.
+        </p>
+      </div><h3>Step 2 — the loss</h3><p><code>loss</code> is a single number summarizing how wrong the model was across the whole batch. Lower is better. Everything else in training exists to make this number go down. Section 12 pulls it apart.</p><h3>Step 4 — <code>loss.backward()</code>, the actual magic</h3><p>This one line is what makes deep learning work, and it is worth being precise about what it does.</p><p>While the forward pass ran, PyTorch was quietly recording every operation — this tensor was multiplied by that one, then summed, then squashed. It builds a graph of the whole computation. <code>backward()</code> walks that graph in reverse, applying the chain rule from calculus, and works out for every single one of the 39,361 parameters: <strong>if I nudge this number up slightly, does the loss go up or down, and by how much?</strong></p><div class="define">
+        <span class="term">Gradient</span>
+        <p>
+          That answer. One number per parameter, describing the slope of the loss with respect
+          to it. A gradient of +0.4 means "increasing this parameter increases the loss" — so
+          to reduce loss, decrease the parameter. A gradient of exactly 0 means the parameter
+          has no effect on the loss at all, which is almost always a bug. (It was.)
+        </p>
+        <p>
+          After <code>backward()</code>, every parameter has a <code>.grad</code> attribute
+          holding its gradient. Nothing has changed yet — the parameters still have their old
+          values.
+        </p>
+      </div><h3>Step 6 — <code>opt.step()</code>, where learning happens</h3><p>The optimizer reads all those gradients and updates the parameters. The simplest possible rule is <code>parameter −= learning_rate × gradient</code>: move each number a little way downhill. That is plain gradient descent.</p><p>We use AdamW, which does the same thing with two refinements:</p><div class="define">
+        <span class="term">AdamW</span>
+        <p>
+          <em>Momentum</em>: it keeps a running average of recent gradients, so a parameter
+          consistently pushed the same way builds up speed, and one being pushed back and forth
+          mostly cancels out.
+        </p>
+        <p>
+          <em>Per-parameter step sizes</em>: it tracks how large each parameter's gradients
+          typically are and scales accordingly, so rarely-used parameters (like an embedding
+          row for an uncommon suffix) still move meaningfully.
+        </p>
+        <p>
+          The <em>W</em> is weight decay — a small pull of every parameter toward zero each
+          step, which discourages the model from relying on any one number too heavily.
+        </p>
+      </div><h3>Steps 3 and 5 — the housekeeping</h3><p><code>zero_grad()</code> exists because PyTorch <em>accumulates</em> gradients by default rather than replacing them. Forget this line and every batch adds to the last one, the steps grow without bound, and training diverges. It is the classic first PyTorch bug.</p><p><code>clip_grad_norm_(..., 1.0)</code> caps the overall size of the update. If one odd batch produces a huge gradient, this scales it back down so a single strange paragraph cannot undo an epoch of progress.</p><h3>The learning rate schedule</h3><pre><code>sched = torch.optim.lr_scheduler.OneCycleLR(
+    opt, max_lr=3e-3, total_steps=steps, pct_start=0.15)</code></pre><p>The learning rate — how big a step to take — is not constant. OneCycle warms it up from near zero over the first 15% of training, then decays it smoothly to near zero again. Early on, big steps explore; later, small steps settle into a good spot rather than bouncing around it.</p><h3>Watching it work</h3><p>Here is what real output looks like, from the actual run that produced the shipped model:</p><pre><code>epoch   1  loss 5.5481  bce 1.049  list 4.460  | val ρ 0.451
+epoch   2  loss 5.2456  bce 0.844  list 4.372  | val ρ 0.609
+epoch   5  loss 5.1542  bce 0.788  list 4.339  | val ρ 0.622
+epoch  20  loss 5.0402  bce 0.713  list 4.299  | val ρ 0.655
+epoch  40  loss 5.0110  bce 0.699  list 4.289  | val ρ 0.656</code></pre><p>The loss falls fast, then crawls. Most of the learning happens in the first few epochs; the rest is refinement. We evaluate on data the model never trains on — the <strong>validation set</strong>, 15% held back — because loss on training data only tells you the model memorized, not that it understood.</p><h2 id="s12"><span class="num">12</span>The loss function, all three parts</h2><p>"How wrong were we" sounds like it should have one obvious answer. It does not, because "which words are important" is really three different claims at once.</p><h3>Part one — is each word individually right?</h3><pre><code>losses = F.binary_cross_entropy_with_logits(
+    logits, targets, reduction=<span class="s">"none"</span>,
+    pos_weight=torch.tensor(3.0))
+<span class="k">return</span> (losses * mask).sum() / mask.sum().clamp(min=1)</code></pre><div class="define">
+        <span class="term">Cross-entropy</span>
+        <p>
+          The standard way to score a probability against a truth. If the truth is 1 and you
+          said 0.9, the penalty is small. If the truth is 1 and you said 0.01, the penalty is
+          large — and it grows without bound as you approach 0. Confident and wrong is punished
+          far more than uncertain and wrong, which is the behaviour you want.
+        </p>
+      </div><p>Our targets are not 0 or 1 but fractions like 0.67, and cross-entropy handles that perfectly well — it just means the ideal prediction is 0.67 too.</p><p><code>pos_weight=3.0</code> compensates for imbalance. Only about 25% of words are marked, so a model that said "not important" for everything would already be 75% correct and learn nothing. Weighting positives 3× makes missing an important word three times as expensive as a false alarm.</p><p><code>mask</code> is the word-vs-punctuation mask. Multiplying by it and dividing by its sum averages over real words only, so padding and commas contribute exactly nothing.</p><h3>Part two — is the <em>order</em> right?</h3><p>Here is the problem with stopping at cross-entropy. The app highlights the top 20% of words. What matters is not whether each score is well-calibrated but whether the right words are <em>at the top</em>. A model that scores every important word 0.6 and every unimportant one 0.4 is badly calibrated and perfectly ranked — it would produce flawless highlights while cross-entropy complains.</p><pre><code><span class="k">def</span> listnet(logits, targets, mask, tau):
+    log_pred = F.log_softmax(
+        logits.masked_fill(~mask, neg), dim=-1)
+    target_dist = F.softmax(
+        (targets / tau).masked_fill(~mask, neg), dim=-1)
+    <span class="k">return</span> -(target_dist * log_pred).sum(dim=-1).mean()</code></pre><div class="define">
+        <span class="term">Softmax</span>
+        <p>
+          Turns a list of arbitrary numbers into a list that is positive and sums to 1 — a
+          probability distribution. Here it converts "the scores for this paragraph's words"
+          into "how the attention of a reader should be distributed across them".
+        </p>
+      </div><p>So we build two distributions over the paragraph's words — one from the model, one from the oracle — and penalize the difference. This is a <strong>ranking loss</strong>: it only cares about the relative shares, so it pushes the right words up <em>relative to each other</em> and is indifferent to the absolute level.</p><p><code>tau=0.5</code> sharpens the target distribution before comparing, concentrating the signal on the words the oracle most agreed about.</p><h3>Part three — is roughly the right number marked?</h3><pre><code><span class="k">def</span> budget(logits, mask, target_rate):
+    probs = torch.sigmoid(logits) * mask
+    rate = probs.sum() / mask.sum().clamp(min=1)
+    <span class="k">return</span> (rate - target_rate) ** 2</code></pre><p>A ranking loss alone is happy for every score to drift to 0.9 or 0.1, as long as the order holds. This term pins the average predicted score near 20%, which keeps the numbers interpretable and means a fixed 0.5 threshold roughly works.</p><pre><code>total = 1.0 * bce  +  1.0 * listnet  +  0.5 * budget</code></pre><p>Three weights, chosen by judgement rather than search. Whether they earn their keep is a measurable question, and we measure it in Part five.</p><h2 id="s13"><span class="num">13</span>Three bugs worth describing</h2><h3>A quarter of the parameters did nothing</h3><p>After wiring up PyTorch, the first thing to check is that every parameter actually receives a gradient. Recall what a zero gradient means: <em>this number has no effect on the loss</em>. Two tensors had exactly that — <code>fwd.down</code> and <code>bwd.down</code>, every down-sweep parameter in both directions.</p><pre><code>dead = [n <span class="k">for</span> n, p <span class="k">in</span> m.named_parameters()
+        <span class="k">if</span> p.grad.abs().sum().item() == 0]
+<span class="c"># ['fwd.down', 'bwd.down']   ← 1,536 parameters doing nothing</span></code></pre><p>The cause was where I had placed the per-level gate. I had written the combine as <code>z = z_A·z_B·g</code>, putting the gate on the decay term. But the final step of the scan reads only the <em>carry</em>, and the carry never depends on the composed decay — so there was no path through the computation graph from <code>down</code> to the loss. No path, no gradient.</p><figure>
+        <p class="fig-label">Figure 9 — Where the level gate goes</p>
+        <svg viewBox="0 0 680 210" role="img" aria-label="Dead gradient diagram">
+          <text class="t-title" x="4" y="14">before — gate on the decay</text>
+          <text class="t-title" x="360" y="14">after — gate on the carry</text>
+          <g>
+            <rect class="box" x="4" y="30" width="80" height="30" rx="5"></rect>
+            <text class="t-small" x="44" y="49" text-anchor="middle">z = z·z·g</text>
+            <rect class="box" x="4" y="86" width="80" height="30" rx="5"></rect>
+            <text class="t-small" x="44" y="105" text-anchor="middle">w = w + z·w</text>
+            <path class="edge-dead" d="M84 45 H150" marker-end="url(#ahr)"></path>
+            <text class="t-tiny" x="156" y="42" fill="#b3283a">never read</text>
+            <text class="t-tiny" x="156" y="54" fill="#b3283a">by the output</text>
+            <path class="edge-hi" d="M84 101 H150" marker-end="url(#aho)"></path>
+            <rect class="box-hi" x="156" y="86" width="98" height="30" rx="5"></rect>
+            <text class="t-small" x="205" y="105" text-anchor="middle">final fold</text>
+            <text class="t-tiny" x="4" y="146" fill="#b3283a">∂loss/∂down = 0 exactly</text>
+            <text class="t-tiny" x="4" y="160">1,536 of 39,361 params inert</text>
+          </g>
+          <line x1="340" y1="24" x2="340" y2="180" stroke="#e4e0d6" stroke-dasharray="3 4"></line>
+          <g transform="translate(360,0)">
+            <rect class="box" x="4" y="30" width="80" height="30" rx="5"></rect>
+            <text class="t-small" x="44" y="49" text-anchor="middle">z = z·z</text>
+            <rect class="box-hi" x="4" y="86" width="90" height="30" rx="5"></rect>
+            <text class="t-small" x="49" y="105" text-anchor="middle">w = w + z·w·g</text>
+            <path class="edge-hi" d="M94 101 H160" marker-end="url(#aho)"></path>
+            <rect class="box-hi" x="166" y="86" width="98" height="30" rx="5"></rect>
+            <text class="t-small" x="215" y="105" text-anchor="middle">final fold</text>
+            <text class="t-tiny" x="4" y="146">both sweeps now train</text>
+            <text class="t-tiny" x="4" y="160">gate = how much of the left segment carries right</text>
+          </g>
+          <defs>
+            <marker id="ahr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 0 L8 4 L0 8 z" fill="#b3283a"></path>
+            </marker>
+            <marker id="aho" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 0 L8 4 L0 8 z" fill="hsl(22 94% 52%)"></path>
+            </marker>
+          </defs>
+          <line x1="4" y1="190" x2="676" y2="190" stroke="#e4e0d6"></line>
+          <text class="t-small" x="4" y="204">Both implementations agreed with each other perfectly. They were consistently wrong.</text>
+        </svg>
+        <figcaption>
+          Every conformance test passed throughout, because <b>TypeScript and PyTorch agreed on
+          the wrong answer</b>. Tests that compare two implementations cannot find a bug that
+          lives in the design. Only the gradient check found this.
+        </figcaption>
+      </figure><h3>Gates that start closed can never open</h3><p>A test asserting "a distant word changes this score" failed with a difference of <em>exactly zero</em>. Not approximately zero — zero.</p><p>The forget gate is <code>sigmoid(something)</code>, and at the default initialization that "something" is near 0, so the gate sits at <code>sigmoid(0) = 0.5</code>. The carry therefore halves at every step: after 20 tokens it is at 0.520 ≈ one in a million, and after about a hundred it has underflowed float32 to literal zero.</p><p>This is worse than it sounds, because of how learning works. No influence means no gradient; no gradient means the gate never learns to open. The model does not start bad-at-long-range and improve — it starts <em>structurally incapable</em> of long range and stays there, while training loss falls and everything looks fine.</p><p>Measured on our implementation: a word 8 tokens away moved a score by <code>1.6e-7</code>; one 90 tokens away moved it by <code>0</code>. The fix is two constants — <code>FORGET_BIAS_INIT = 2.0</code> (so the gate starts at 0.88) and <code>LEVEL_GATE_INIT = 3.0</code> — and they are now part of the written specification, because a model that trains, converges, and is quietly incapable of its own purpose is the worst kind of broken.</p><h3>The tokenizer was shredding every number</h3><p>The first pilot labels contained this highlight residue:</p><blockquote><p>…delta grown <strong>1 6</strong> kilometers year <strong>1 2</strong> kilometers…</p></blockquote><p><code>1.6</code> was tokenizing as three tokens — <code>1</code>, <code>.</code>, <code>6</code>. Quantities are exactly the facts a highlighter exists to preserve, and we were destroying all of them. That is the third <code>elif</code> branch in the tokenizer from section 5, added afterwards. Caught not by a test but by reading the actual output.</p><div class="part-head">
+        <span class="label">Part four</span>
+        <h2>How we know</h2>
+        <p>
+          Measuring the right thing, shipping the weights, and keeping three implementations
+          honest.
+        </p>
+      </div><h2 id="s14"><span class="num">14</span>Measuring the right thing</h2><p>The obvious metric is accuracy: what fraction of words did we classify correctly? It is also useless here. Since only 25% of words are important, a model that marks <em>nothing</em> scores 75% accuracy. You need metrics that match how the output is actually consumed.</p><h3>Precision@k — the operating point</h3><p>The app marks the top 15%, or 20%, or 25% of words. So evaluate exactly that: take the top k, ask how many were genuinely important.</p><div class="worked">
+        <span class="tag">Worked example — precision@20%</span>
+        <p>
+          A paragraph has 10 words, so the top 20% is <code>k = 2</code>. The model's two
+          highest-scoring words are "reactor" and "the". The oracle marked "reactor",
+          "criticality" and "achieved".
+        </p>
+        <p>
+          One of our two picks was right. <strong>P@20% = 0.5.</strong> Recall@20% is different:
+          we found 1 of the 3 the oracle marked, so <strong>R@20% = 0.33</strong>. Precision
+          asks "were our picks good", recall asks "did we find everything". With a fixed budget
+          of k words you cannot maximize both, and precision is what a reader feels.
+        </p>
+      </div><p class="filename">salience/eval/metrics.py</p><pre><code><span class="k">def</span> precision_recall_at_k(scores, targets, frac, threshold=0.5):
+    k = max(1, round(frac * len(scores)))
+    top = np.argsort(-scores)[:k]      <span class="c"># indices of the k best</span>
+    relevant = targets &gt;= threshold
+    hits = relevant[top].sum()
+    <span class="k">return</span> hits / k, hits / max(1, relevant.sum())</code></pre><h3>Average precision — threshold-free</h3><p>P@k needs you to pick a k. Average precision sweeps every possible cutoff: walk down the ranked list, and each time you hit a genuinely important word, record the precision at that depth. Average those. It rewards putting important words early and is robust to the class imbalance that breaks accuracy.</p><h3>Spearman — did we get the order right?</h3><p>This is the headline number, and it is the one most worth understanding properly.</p><div class="define">
+        <span class="term">Spearman rank correlation (ρ)</span>
+        <p>
+          A number from −1 to +1 measuring whether two lists put things in the same
+          <em>order</em>. +1 means identical ordering. 0 means no relationship. −1 means exactly
+          reversed.
+        </p>
+        <p>
+          The trick is that it throws away the actual values and keeps only the ranks — 1st,
+          2nd, 3rd — then measures ordinary correlation on those. So it does not care whether
+          you said 0.9 or 0.6, only whether you put the right word first.
+        </p>
+      </div><p>That is exactly right for this problem. The product is a ranking; the scores are just the mechanism. Spearman measures the product.</p><div class="worked">
+        <span class="tag">Worked example — computing Spearman by hand</span>
+        <p>Four words. The model's scores, and the oracle's targets:</p>
+        <table>
+          <thead>
+            <tr><th>word</th><th>model</th><th>rank</th><th>oracle</th><th>rank</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>reactor</td><td>0.90</td><td>4</td><td>1.00</td><td>4</td></tr>
+            <tr><td>the</td><td>0.10</td><td>1</td><td>0.00</td><td>1.5</td></tr>
+            <tr><td>achieved</td><td>0.70</td><td>3</td><td>0.67</td><td>3</td></tr>
+            <tr><td>on</td><td>0.30</td><td>2</td><td>0.00</td><td>1.5</td></tr>
+          </tbody>
+        </table>
+        <p>
+          Ranks run lowest-to-highest. "the" and "on" are tied at 0.00 in the oracle, so they
+          share the average of ranks 1 and 2 — that is the <code>1.5</code>.
+        </p>
+        <p>
+          Now subtract the mean rank (2.5) from each column and correlate. Model deviations:
+          +1.5, −1.5, +0.5, −0.5. Oracle deviations: +1.5, −1.0, +0.5, −1.0.
+        </p>
+        <p>
+          Multiply pairwise and sum: 2.25 + 1.5 + 0.25 + 0.5 = <strong>4.5</strong>. Divide by
+          the square root of (5 × 4.5) = 4.743. <strong>ρ = 0.949.</strong> Nearly perfect
+          ordering, despite no score matching its target exactly — which is the point.
+        </p>
+      </div><p>Our implementation is that arithmetic, with ties handled properly:</p><pre><code><span class="k">def</span> spearman(scores, targets):
+    <span class="c"># ties get the average rank</span>
+    a, b = _rankdata(scores), _rankdata(targets)
+    a, b = a - a.mean(), b - b.mean()
+    denom = np.sqrt((a * a).sum() * (b * b).sum())
+    <span class="k">return</span> float((a * b).sum() / denom)</code></pre><p>Computed per paragraph, then averaged. Not pooled across the whole dataset — importance is relative <em>within</em> a paragraph, and pooling would reward the model for something it is not asked to do.</p><h3>Baselines, so the number means something</h3><p>A Spearman of 0.661 is meaningless in isolation. We compare against four deliberately cheap alternatives, the important one being <strong>not-a-stopword</strong>: mark every word that is not "the", "of", "is". For the specific question "which words carry meaning", that gets you a long way, and any model failing to beat it has not earned its complexity.</p><h2 id="s15"><span class="num">15</span>One character per parameter</h2><p>gpu-lexer's weights are a single 41,321-character string — one character per parameter, base-63, with a scale per tensor. Roughly 6 bits each, and it is the entire reason the thing fits in 27&nbsp;KB.</p><div class="define">
+        <span class="term">Quantization</span>
+        <p>
+          Storing each parameter with less precision. A float32 uses 32 bits and can represent
+          billions of distinct values; we use 63. Instead of 0.041730..., store the integer
+          −13 and one scale factor for the whole tensor, then multiply back at load time. The
+          model is slightly wrong everywhere, and it turns out not to matter.
+        </p>
+      </div><figure>
+        <p class="fig-label">Figure 10 — A float becomes a character</p>
+        <svg viewBox="0 0 680 128" role="img" aria-label="Quantization pipeline">
+          <g>
+            <rect class="box" x="4" y="34" width="104" height="34" rx="5"></rect>
+            <text class="t-small" x="56" y="55" text-anchor="middle">-0.04173</text>
+            <text class="t-tiny" x="56" y="84" text-anchor="middle">float32 weight</text>
+          </g>
+          <path class="arrow" d="M108 51 H134" marker-end="url(#ah2)"></path>
+          <g>
+            <rect class="box" x="138" y="34" width="112" height="34" rx="5"></rect>
+            <text class="t-small" x="194" y="55" text-anchor="middle">÷ scale, round</text>
+            <text class="t-tiny" x="194" y="84" text-anchor="middle">scale = max|w| / 31</text>
+          </g>
+          <path class="arrow" d="M250 51 H276" marker-end="url(#ah2)"></path>
+          <g>
+            <rect class="box" x="280" y="34" width="72" height="34" rx="5"></rect>
+            <text class="t-small" x="316" y="55" text-anchor="middle">-13</text>
+            <text class="t-tiny" x="316" y="84" text-anchor="middle">int in [-31,31]</text>
+          </g>
+          <path class="arrow" d="M352 51 H378" marker-end="url(#ah2)"></path>
+          <g>
+            <rect class="box" x="382" y="34" width="96" height="34" rx="5"></rect>
+            <text class="t-small" x="430" y="55" text-anchor="middle">25</text>
+            <text class="t-tiny" x="430" y="84" text-anchor="middle">zigzag → [0,62]</text>
+          </g>
+          <path class="arrow" d="M478 51 H504" marker-end="url(#ah2)"></path>
+          <g>
+            <rect class="box-hi" x="508" y="34" width="72" height="34" rx="5"></rect>
+            <text class="t-title" x="544" y="56" text-anchor="middle">'O'</text>
+            <text class="t-tiny" x="544" y="84" text-anchor="middle">1 character</text>
+          </g>
+          <text class="t-small" x="596" y="55">→ JSON</text>
+          <defs>
+            <marker id="ah2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 0 L8 4 L0 8 z" fill="#8f8b80"></path>
+            </marker>
+          </defs>
+          <line x1="4" y1="104" x2="676" y2="104" stroke="#e4e0d6"></line>
+          <text class="t-small" x="4" y="120">Zigzag keeps small magnitudes on early symbols, so neighbouring weights share characters and Brotli does the rest.</text>
+        </svg>
+        <figcaption>
+          39,361 parameters → 39.9&nbsp;KB of JSON → <b>21.1&nbsp;KB Brotli</b>. Smaller than
+          gpu-lexer at comparable parameter count, mostly because we ship one output logit
+          instead of nine.
+        </figcaption>
+      </figure><p>Zigzag encoding is the neat bit. Mapping −1, 0, 1 to 1, 0, 2 means small magnitudes — which is most weights — land on the first few characters of the alphabet. Runs of similar characters are exactly what a compressor exploits.</p><div class="callout">
+        <span class="tag">A plan that survived contact with measurement</span>
+        <p>
+          We had budgeted for quantization-aware training — teaching the model to cope with low
+          precision <em>during</em> training, which is several hundred lines and a second
+          training phase. Before building it we measured plain post-training quantization.
+          Held-out Spearman went from <strong>0.6218 to 0.6221</strong>. Inside the noise. The
+          QAT was never written. Measure before you build the mitigation.
+        </p>
+      </div><h2 id="s16"><span class="num">16</span>Three implementations, one answer</h2><p>The model exists three times: PyTorch for training, TypeScript for the browser, and eventually WGSL for the GPU. Any of them can drift in ways that produce plausible output and silently worse quality.</p><p>So a written specification is normative, and three fixture layers enforce it. Python generates, TypeScript verifies.</p><figure>
+        <p class="fig-label">Figure 11 — The conformance ladder</p>
+        <svg viewBox="0 0 680 172" role="img" aria-label="Conformance fixtures">
+          <rect class="box-cool" x="4" y="56" width="104" height="44" rx="6"></rect>
+          <text class="t-title" x="56" y="75" text-anchor="middle">PyTorch</text>
+          <text class="t-small" x="56" y="90" text-anchor="middle">trainer</text>
+          <rect class="box-hi" x="556" y="56" width="120" height="44" rx="6"></rect>
+          <text class="t-title" x="616" y="75" text-anchor="middle">TypeScript</text>
+          <text class="t-small" x="616" y="90" text-anchor="middle">browser</text>
+          <g>
+            <rect class="box" x="168" y="8" width="320" height="34" rx="5"></rect>
+            <text class="t-small" x="182" y="29">features.jsonl — 2,000 adversarial inputs, 12,650 tokens</text>
+            <rect class="box" x="168" y="60" width="320" height="34" rx="5"></rect>
+            <text class="t-small" x="182" y="81">scan.jsonl — 8 sequence lengths, the tree shape</text>
+            <rect class="box" x="168" y="112" width="320" height="34" rx="5"></rect>
+            <text class="t-small" x="182" y="133">scores.jsonl — 40 paragraphs, the whole chain</text>
+          </g>
+          <path class="arrow" d="M108 70 H140 V25 H166" marker-end="url(#ah3)"></path>
+          <path class="arrow" d="M108 78 H140 V77 H166" marker-end="url(#ah3)"></path>
+          <path class="arrow" d="M108 86 H140 V129 H166" marker-end="url(#ah3)"></path>
+          <path class="arrow" d="M488 25 H516 V70 H554" marker-end="url(#ah3)"></path>
+          <path class="arrow" d="M488 77 H554" marker-end="url(#ah3)"></path>
+          <path class="arrow" d="M488 129 H516 V86 H554" marker-end="url(#ah3)"></path>
+          <defs>
+            <marker id="ah3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 0 L8 4 L0 8 z" fill="#8f8b80"></path>
+            </marker>
+          </defs>
+          <text class="t-tiny" x="168" y="164">integers must match exactly · floats within 2e-4 · never edit a fixture to make a test pass</text>
+        </svg>
+        <figcaption>
+          The adversarial inputs are the ones that hurt: emoji with zero-width joiners, CRLF,
+          Turkish dotted İ, combining accents, CJK, <code>__dunder__</code>, astral-plane
+          characters. Unicode is where two languages quietly disagree — JS bitwise operators
+          are int32, so every hash step needs <code>Math.imul</code> and <code>&gt;&gt;&gt;0</code>,
+          and lowercasing must be ASCII-only because <code>toLowerCase()</code> and
+          <code>str.lower()</code> differ on İ and ß.
+        </figcaption>
+      </figure><p>You can watch this working. In the app, switch <em>Run on</em> from browser to server: it sends the same paragraph to PyTorch and reports the largest per-word disagreement. It reads about <code>6e-7</code>.</p><div class="part-head">
+        <span class="label">Part five</span>
+        <h2>How far it can go</h2>
+        <p>
+          What the model scores, what the maximum possible score is, and which levers close
+          the gap.
+        </p>
+      </div><h2 id="s17"><span class="num">17</span>Results</h2><p>Evaluated on 1,497 held-out paragraphs the model never saw during training.</p><table style="min-width: 125px;"><colgroup><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"></colgroup><tbody><tr><th colspan="1" rowspan="1"><p>method</p></th><th colspan="1" rowspan="1"><p>P@15%</p></th><th colspan="1" rowspan="1"><p>P@20%</p></th><th colspan="1" rowspan="1"><p>AP</p></th><th colspan="1" rowspan="1"><p>Spearman</p></th></tr><tr><td colspan="1" rowspan="1"><p>random</p></td><td colspan="1" rowspan="1"><p>0.264</p></td><td colspan="1" rowspan="1"><p>0.254</p></td><td colspan="1" rowspan="1"><p>0.297</p></td><td colspan="1" rowspan="1"><p>−0.010</p></td></tr><tr><td colspan="1" rowspan="1"><p>position (topic sentence)</p></td><td colspan="1" rowspan="1"><p>0.385</p></td><td colspan="1" rowspan="1"><p>0.372</p></td><td colspan="1" rowspan="1"><p>0.387</p></td><td colspan="1" rowspan="1"><p>0.160</p></td></tr><tr><td colspan="1" rowspan="1"><p>tf-idf</p></td><td colspan="1" rowspan="1"><p>0.508</p></td><td colspan="1" rowspan="1"><p>0.495</p></td><td colspan="1" rowspan="1"><p>0.531</p></td><td colspan="1" rowspan="1"><p>0.480</p></td></tr><tr><td colspan="1" rowspan="1"><p>not-a-stopword</p></td><td colspan="1" rowspan="1"><p>0.600</p></td><td colspan="1" rowspan="1"><p>0.580</p></td><td colspan="1" rowspan="1"><p>0.596</p></td><td colspan="1" rowspan="1"><p>0.506</p></td></tr><tr><td colspan="1" rowspan="1"><p>this model — 39,361 params</p></td><td colspan="1" rowspan="1"><p>0.765</p></td><td colspan="1" rowspan="1"><p>0.725</p></td><td colspan="1" rowspan="1"><p>0.747</p></td><td colspan="1" rowspan="1"><p>0.661</p></td></tr></tbody></table><p>The model beats the best baseline by 16 points of precision, and the gap sits exactly where you would want it: it discriminates <em>among</em> content words, and it keeps the function words that actually matter.</p><h3>Out of distribution</h3><p>Top 20% of words on text from registers the model was not trained on:</p><div class="reading-demo">
+        <span class="tag">A rental contract</span>
+        <span class="telegram">tenant not sublet premises without consent not sublease liable</span>
+      </div><div class="reading-demo">
+        <span class="tag">A recipe</span>
+        <span class="telegram">Heat oil pan add 8 minutes not tomatoes reduce simmer 25</span>
+      </div><p>Both preserve their negations — "shall <em>not</em> sublet … <em>without</em> consent", "soft but <em>not</em> browned". A tf-idf extractor drops those as low-information words, and the residue then asserts the opposite of the source.</p><h3>Speed</h3><p>On a 65-word paragraph: <strong>17&nbsp;ms in the browser</strong>, 61&nbsp;ms through PyTorch on the same machine. The browser is faster because at 39k parameters the framework overhead dwarfs the arithmetic — which is most of the argument for shipping the model to the client rather than serving it.</p><h2 id="s18"><span class="num">18</span>The ceiling, and the road to 0.9</h2><p>Spearman 0.661. Is that good? The honest answer requires a question almost nobody asks first: <strong>what is the highest score that is even possible?</strong></p><p>It is not 1.0. Our labels are not ground truth — they are three samples from an LLM that <em>disagrees with itself</em>. If two independent annotations of the same paragraph only partly agree, then a hypothetically perfect model cannot score 1.0 against their average, because the average still contains noise. You cannot correlate perfectly with a noisy measurement.</p><p>This is measurable, using a standard piece of psychometrics.</p><div class="worked">
+        <span class="tag">Measuring the noise floor</span>
+        <p>
+          <strong>Step 1 — how much does the oracle agree with itself?</strong> Take annotation
+          A and annotation B of the same paragraph and correlate them. Averaged over 29,992
+          pairs: <strong>ρ = 0.704</strong>. Two runs of the same prompt on the same text agree
+          at 0.704, not 1.0.
+        </p>
+        <p>
+          <strong>Step 2 — averaging reduces noise, predictably.</strong> We do not train
+          against one annotation, we train against the mean of three, and averaging cancels
+          some of the disagreement. The Spearman-Brown formula says exactly how much:
+        </p>
+        <pre><code>r_k = k·r / (1 + (k−1)·r)
+
+r_3 = 3 × 0.704 / (1 + 2 × 0.704)
+    = 2.112 / 2.408
+    = <b>0.877</b></code></pre>
+        <p>
+          <code>r_3 = 0.877</code> is the <em>reliability</em> of our training target: the
+          fraction of the variation in it that is real signal rather than sampling noise. Just
+          under 88% real, just over 12% noise.
+        </p>
+        <p>
+          <strong>Step 3 — from reliability to a ceiling.</strong> Imagine a perfect model that
+          outputs the true salience of every word. How well would <em>it</em> score against our
+          noisy target? Not 1.0, because the target is partly noise and nothing can predict
+          noise.
+        </p>
+        <p>
+          The answer is <code>√r_3</code>, and the square root is not arbitrary.
+          <strong>Reliability is a ratio of variances; correlation is a ratio of standard
+          deviations.</strong> Writing the measured target as truth plus independent noise:
+        </p>
+        <pre><code>r_3            = Var(truth) / Var(measured)          <span class="c">a variance ratio</span>
+
+corr(truth, measured)
+   = Cov(truth, measured) / (σ_truth · σ_measured)
+   = Var(truth) / (σ_truth · σ_measured)             <span class="c">noise is independent</span>
+   = σ_truth / σ_measured                            <span class="c">a σ ratio</span>
+   = √( Var(truth) / Var(measured) )  =  <b>√r_3</b></code></pre>
+        <p>
+          So the ceiling is <code>√0.877</code> = <strong>0.936</strong>. This is the classical
+          "correction for attenuation" from psychometrics, where it is used to ask how good a
+          test could be if you could measure its subject without error.
+        </p>
+      </div><div class="callout">
+        <span class="tag">What this number does and does not mean</span>
+        <p>
+          The whole argument assumes the oracle's disagreements are <em>random</em>. If it is
+          consistently wrong in some direction — say it systematically over-marks proper nouns —
+          averaging more samples will not remove that, and the "truth" this converges on is
+          simply the oracle's settled opinion.
+        </p>
+        <p>
+          So 0.936 is the ceiling for <strong>agreeing with this oracle</strong>, not for being
+          right about English. Checking the oracle against actual human judgement is a different
+          measurement, and one we have not made.
+        </p>
+      </div><figure>
+        <p class="fig-label">Figure 12 — Where the remaining error lives</p>
+        <div class="bars">
+          <div class="bar-row">
+            <span class="bar-name">not-a-stopword</span>
+            <span class="bar-track"><span class="bar-fill" style="width:54.1%"></span></span>
+            <span class="bar-val">0.506</span>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">our model</span>
+            <span class="bar-track"><span class="bar-fill ours" style="width:70.6%"></span></span>
+            <span class="bar-val">0.661</span>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">train set</span>
+            <span class="bar-track"><span class="bar-fill ours" style="width:73.3%"></span></span>
+            <span class="bar-val">0.686</span>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">ceiling</span>
+            <span class="bar-track"><span class="bar-fill" style="width:100%"></span></span>
+            <span class="bar-val">0.936</span>
+          </div>
+        </div>
+        <figcaption>
+          The ceiling of <b>0.936</b> is derived immediately above — it is the oracle's
+          agreement with itself, not a round number. We are at <b>71% of the achievable
+          maximum</b>, and the bar labelled "train set" is the important one; see below.
+        </figcaption>
+      </figure><h3>The diagnosis: we are underfitting</h3><p>There are two reasons a model falls short, and they have opposite cures. Comparing performance on data it trained on against data it did not tells you which:</p><table style="min-width: 100px;"><colgroup><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"></colgroup><tbody><tr><th colspan="1" rowspan="1"><p>metric</p></th><th colspan="1" rowspan="1"><p>train</p></th><th colspan="1" rowspan="1"><p>val</p></th><th colspan="1" rowspan="1"><p>gap</p></th></tr><tr><td colspan="1" rowspan="1"><p>P@15%</p></td><td colspan="1" rowspan="1"><p>0.816</p></td><td colspan="1" rowspan="1"><p>0.765</p></td><td colspan="1" rowspan="1"><p>+0.050</p></td></tr><tr><td colspan="1" rowspan="1"><p>AP</p></td><td colspan="1" rowspan="1"><p>0.793</p></td><td colspan="1" rowspan="1"><p>0.747</p></td><td colspan="1" rowspan="1"><p>+0.046</p></td></tr><tr><td colspan="1" rowspan="1"><p>Spearman</p></td><td colspan="1" rowspan="1"><p>0.686</p></td><td colspan="1" rowspan="1"><p>0.661</p></td><td colspan="1" rowspan="1"><p>+0.025</p></td></tr></tbody></table><div class="define">
+        <span class="term">Overfitting vs underfitting</span>
+        <p>
+          <em>Overfitting</em> is memorizing: near-perfect on training data, much worse on new
+          data. A large train–val gap. The cure is more data or a smaller model.
+        </p>
+        <p>
+          <em>Underfitting</em> is failing to capture the pattern at all: mediocre on both, with
+          a small gap. The cure is a bigger model, better features, or better optimization —
+          more data will not help, because the model cannot use the data it already has.
+        </p>
+      </div><p>Our gap is <strong>0.025</strong>, and the training score is 0.686 against a ceiling of 0.936. The model cannot fit even the data it has already seen. That rules out the usual first answer — it is not memorizing, so throwing more paragraphs at it is unlikely to be the fix. Something else is binding.</p><h3>Pulling every lever</h3><p>So the obvious move is more capacity. We made the model's dimensions configurable and trained ten variants, 30 epochs each, same data and split:</p><table style="min-width: 125px;"><colgroup><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"></colgroup><tbody><tr><th colspan="1" rowspan="1"><p>configuration</p></th><th colspan="1" rowspan="1"><p>params</p></th><th colspan="1" rowspan="1"><p>train ρ</p></th><th colspan="1" rowspan="1"><p>val ρ</p></th><th colspan="1" rowspan="1"><p>P@15%</p></th></tr><tr><td colspan="1" rowspan="1"><p>baseline</p></td><td colspan="1" rowspan="1"><p>39,361</p></td><td colspan="1" rowspan="1"><p>0.690</p></td><td colspan="1" rowspan="1"><p>0.661</p></td><td colspan="1" rowspan="1"><p>0.767</p></td></tr><tr><td colspan="1" rowspan="1"><p>wider head</p></td><td colspan="1" rowspan="1"><p>47,569</p></td><td colspan="1" rowspan="1"><p>0.689</p></td><td colspan="1" rowspan="1"><p>0.660</p></td><td colspan="1" rowspan="1"><p>0.763</p></td></tr><tr><td colspan="1" rowspan="1"><p>d = 48</p></td><td colspan="1" rowspan="1"><p>61,457</p></td><td colspan="1" rowspan="1"><p>0.704</p></td><td colspan="1" rowspan="1"><p>0.660</p></td><td colspan="1" rowspan="1"><p>0.765</p></td></tr><tr><td colspan="1" rowspan="1"><p>d = 64</p></td><td colspan="1" rowspan="1"><p>85,601</p></td><td colspan="1" rowspan="1"><p>0.717</p></td><td colspan="1" rowspan="1"><p>0.660</p></td><td colspan="1" rowspan="1"><p>0.766</p></td></tr><tr><td colspan="1" rowspan="1"><p>d = 64 + bigger head</p></td><td colspan="1" rowspan="1"><p>116,961</p></td><td colspan="1" rowspan="1"><p>0.717</p></td><td colspan="1" rowspan="1"><p>0.661</p></td><td colspan="1" rowspan="1"><p>0.768</p></td></tr><tr><td colspan="1" rowspan="1"><p>window ±4 instead of ±2</p></td><td colspan="1" rowspan="1"><p>39,489</p></td><td colspan="1" rowspan="1"><p>0.689</p></td><td colspan="1" rowspan="1"><p>0.658</p></td><td colspan="1" rowspan="1"><p>0.763</p></td></tr><tr><td colspan="1" rowspan="1"><p>learning rate 1e-2</p></td><td colspan="1" rowspan="1"><p>39,361</p></td><td colspan="1" rowspan="1"><p>0.706</p></td><td colspan="1" rowspan="1"><p>0.660</p></td><td colspan="1" rowspan="1"><p>0.766</p></td></tr><tr><td colspan="1" rowspan="1"><p>cross-entropy only, no ranking loss</p></td><td colspan="1" rowspan="1"><p>39,361</p></td><td colspan="1" rowspan="1"><p>0.688</p></td><td colspan="1" rowspan="1"><p>0.662</p></td><td colspan="1" rowspan="1"><p>0.766</p></td></tr><tr><td colspan="1" rowspan="1"><p>no budget term</p></td><td colspan="1" rowspan="1"><p>39,361</p></td><td colspan="1" rowspan="1"><p>0.690</p></td><td colspan="1" rowspan="1"><p>0.660</p></td><td colspan="1" rowspan="1"><p>0.764</p></td></tr></tbody></table><p><strong>Nothing moves.</strong> Every configuration lands between 0.656 and 0.662. Tripling the parameters raises the <em>training</em> score from 0.690 to 0.717 and leaves validation exactly where it was — the signature of memorization, not learning. A wider context window is slightly worse. A 3× higher learning rate changes nothing. Deleting the ranking loss entirely changes nothing.</p><p>That last one deserves an admission: the composite loss from section 12, with its careful argument about ranking versus calibration, is <em>not earning its keep at this operating point</em>. Cross-entropy alone matches it. The reasoning was sound; the measurement says it does not matter here.</p><p>When every knob on the model does nothing, the model is not the constraint. It is missing information.</p><h3>Testing the obvious candidate</h3><p>There is a conspicuous hole in the feature set. The model knows how often a word occurs <em>in this paragraph</em>, and it has a stopword bucket covering the 200 commonest words — but it knows nothing about how common a word is in English generally. Meanwhile tf-idf, which is nothing but that signal, scores 0.480 on its own.</p><p>We added a corpus-IDF bucket and retrained:</p><table style="min-width: 125px;"><colgroup><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"></colgroup><tbody><tr><th colspan="1" rowspan="1"><p>run</p></th><th colspan="1" rowspan="1"><p>train ρ</p></th><th colspan="1" rowspan="1"><p>val ρ</p></th><th colspan="1" rowspan="1"><p>P@15%</p></th><th colspan="1" rowspan="1"><p>AP</p></th></tr><tr><td colspan="1" rowspan="1"><p>control</p></td><td colspan="1" rowspan="1"><p>0.688</p></td><td colspan="1" rowspan="1"><p>0.660</p></td><td colspan="1" rowspan="1"><p>0.767</p></td><td colspan="1" rowspan="1"><p>0.746</p></td></tr><tr><td colspan="1" rowspan="1"><p>+ corpus IDF</p></td><td colspan="1" rowspan="1"><p>0.691</p></td><td colspan="1" rowspan="1"><p>0.665</p></td><td colspan="1" rowspan="1"><p>0.770</p></td><td colspan="1" rowspan="1"><p>0.751</p></td></tr></tbody></table><p><strong>+0.005.</strong> Real, reproducible, and nearly free — but not the answer either.</p><h3>The actual diagnosis</h3><p>The decisive measurement is this one. For every word in the validation set, count how many times that word appeared anywhere in the training data, then bucket the model's average error by that count:</p><table style="min-width: 75px;"><colgroup><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"></colgroup><tbody><tr><th colspan="1" rowspan="1"><p>times seen in training</p></th><th colspan="1" rowspan="1"><p>val words</p></th><th colspan="1" rowspan="1"><p>mean absolute error</p></th></tr><tr><td colspan="1" rowspan="1"><p>0 — never seen</p></td><td colspan="1" rowspan="1"><p>4,833</p></td><td colspan="1" rowspan="1"><p>0.341</p></td></tr><tr><td colspan="1" rowspan="1"><p>1–2</p></td><td colspan="1" rowspan="1"><p>3,992</p></td><td colspan="1" rowspan="1"><p>0.348</p></td></tr><tr><td colspan="1" rowspan="1"><p>3–10</p></td><td colspan="1" rowspan="1"><p>8,213</p></td><td colspan="1" rowspan="1"><p>0.348</p></td></tr><tr><td colspan="1" rowspan="1"><p>11–50</p></td><td colspan="1" rowspan="1"><p>18,640</p></td><td colspan="1" rowspan="1"><p>0.350</p></td></tr><tr><td colspan="1" rowspan="1"><p>51–500</p></td><td colspan="1" rowspan="1"><p>40,614</p></td><td colspan="1" rowspan="1"><p>0.339</p></td></tr><tr><td colspan="1" rowspan="1"><p>500+</p></td><td colspan="1" rowspan="1"><p>64,837</p></td><td colspan="1" rowspan="1"><p>0.231</p></td></tr></tbody></table><p>Look at the top five rows. A word the model has <em>never seen</em> and a word it has seen <em>fifty times</em> get the same error, 0.34. Seeing a word fifty times teaches it nothing. Only past 500 occurrences — which is essentially the stopword list — does anything improve.</p><div class="callout">
+        <span class="tag">What is actually limiting this model</span>
+        <p>
+          It is not learning word-specific importance at all. It has learned the generic signals
+          — stopwords are unimportant, capitalized words matter, numbers matter, sentence-initial
+          position matters — and applies them uniformly to every content word it meets.
+        </p>
+        <p>
+          That is the whole explanation. Capacity does not help because there is no per-word
+          signal being stored. The window does not help because the missing information is not
+          nearby. The loss does not help because this is not a ranking problem, it is a knowledge
+          problem. <strong>The model has no idea what any word means, and 10,000 paragraphs is
+          nowhere near enough to learn 54,914 of them from scratch.</strong>
+        </p>
+      </div><h3>So what would actually reach 0.9?</h3><p>Ranked by evidence, strongest first:</p><ol><li><p><strong>Give it semantics instead of making it learn them.</strong> Take a pretrained language model, embed the 50,000 commonest English words, cluster them into 256 semantic groups, and ship the cluster ID as one more feature. That costs 256 rows × 32 = 8,192 parameters plus a word→cluster lookup. The model would then know that "reactor" belongs with "turbine" and "centrifuge" without ever having seen it — precisely the knowledge the table above says it lacks.</p><p>This is the one I would bet on, and it has a real cost: <em>it reintroduces a vocabulary</em>. A 50k-word lookup table is a few hundred kilobytes, which breaks the "27&nbsp;KB, no vocabulary" property that made the architecture interesting in the first place. There is a genuine tension between the size thesis and the accuracy goal, and it should be named rather than papered over.</p></li><li><p><strong>Far more labelled data.</strong> 1k → 10k paragraphs moved P@15% from 0.693 to 0.765, the largest single gain we measured. But the frequency table suggests the mechanism was better coverage of common words, and that curve is flattening — moving the 11–50 bucket to behave like the 500+ bucket needs something like 10–50× more data, not 2×.</p></li><li><p><strong>More samples per paragraph.</strong> Does not improve the model directly, but raises the ceiling it is measured against: 5 samples → 0.960, 9 → 0.977. Also denoises the training signal.</p></li><li><p><strong>Corpus IDF.</strong> +0.005, essentially free. Worth shipping, not worth celebrating.</p></li><li><p><strong>A stronger oracle.</strong> <code>mistral-small</code> agrees with itself at 0.704. A better labeller would raise that, and the ceiling with it.</p></li></ol><div class="callout">
+        <span class="tag">Is 0.9 the right goal?</span>
+        <p>
+          Worth questioning. Spearman is measured against an oracle that is itself only 0.704
+          self-consistent, so the last stretch to 0.9 is partly learning to imitate one
+          particular LLM's idiosyncrasies — which is not the same as being more useful to read.
+        </p>
+        <p>
+          The product metric is P@15% = 0.765: three in four highlighted words are ones the
+          oracle also considered essential. What would tell us more than another 0.05 of Spearman
+          is the evaluation we have not built — give a reader only the highlights and ask whether
+          they can answer questions about the source.
+        </p>
+      </div><h3>The other lever: raise the ceiling itself</h3><p>Everything above chases a fixed 0.936. But that number is not a law of nature — it is a property of <em>how we labelled the data</em>, and Spearman-Brown tells us exactly what it would become with more samples per paragraph:</p><table style="min-width: 100px;"><colgroup><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"><col style="min-width: 25px;"></colgroup><tbody><tr><th colspan="1" rowspan="1"><p>samples per paragraph</p></th><th colspan="1" rowspan="1"><p>target reliability</p></th><th colspan="1" rowspan="1"><p>ceiling</p></th><th colspan="1" rowspan="1"><p>API calls for 10k</p></th></tr><tr><td colspan="1" rowspan="1"><p>3 (what we did)</p></td><td colspan="1" rowspan="1"><p>0.877</p></td><td colspan="1" rowspan="1"><p>0.936</p></td><td colspan="1" rowspan="1"><p>30,000</p></td></tr><tr><td colspan="1" rowspan="1"><p>5</p></td><td colspan="1" rowspan="1"><p>0.922</p></td><td colspan="1" rowspan="1"><p>0.960</p></td><td colspan="1" rowspan="1"><p>50,000</p></td></tr><tr><td colspan="1" rowspan="1"><p>9</p></td><td colspan="1" rowspan="1"><p>0.955</p></td><td colspan="1" rowspan="1"><p>0.977</p></td><td colspan="1" rowspan="1"><p>90,000</p></td></tr><tr><td colspan="1" rowspan="1"><p>15</p></td><td colspan="1" rowspan="1"><p>0.973</p></td><td colspan="1" rowspan="1"><p>0.986</p></td><td colspan="1" rowspan="1"><p>150,000</p></td></tr></tbody></table><p>There is a real trade here. With a fixed labelling budget, 10,000 paragraphs × 3 samples and 6,000 × 5 samples cost about the same. The first gives more variety; the second gives cleaner targets and a higher ceiling. Given that extra paragraphs are not currently teaching the model much about individual words, <strong>the second is probably the better trade</strong> — a conclusion that only becomes visible once you measure the ceiling.</p><p>And a cheaper option: the oracle was <code>mistral-small</code>. A stronger model would likely agree with itself more, raising <code>r₁</code> above 0.704 and lifting the ceiling at every sample count.</p><h2 id="s19"><span class="num">19</span>What transferred</h2><p>The specific recipe — feature-bag embedding, local window, learned associative scan, tiny gated head, 6-bit weights — turned out to be genuinely portable from syntax highlighting to prose salience. Two very different problems, one architecture, roughly the same parameter count and wire size.</p><p>What generalizes beyond this particular pair of problems:</p><ul><li><p><strong>Feature engineering can replace a vocabulary.</strong> When embedding tables would dominate your budget, hashing hand-picked features into a shared table and summing the rows is a very good trade — and it is the single decision that makes everything else fit.</p></li><li><p><strong>Associative scans are an underrated alternative to attention</strong> when you need global context on a budget: log depth, fully parallel, a few thousand parameters instead of millions.</p></li><li><p><strong>Check for zero gradients before you check accuracy.</strong> A dead parameter produces a model that trains, converges, and is quietly worse than it should be. No conformance test will find it, because the bug is in the design rather than in one implementation.</p></li><li><p><strong>Initialize gates open.</strong> If a mechanism starts switched off, it receives no gradient, and it can never learn to switch itself on. The failure is silent and permanent.</p></li><li><p><strong>Measure before building the mitigation.</strong> The quantization-aware training we planned would have bought 0.0003 Spearman.</p></li><li><p><strong>Measure the ceiling before chasing a number.</strong> "Is 0.661 good?" is unanswerable; "0.661 out of a possible 0.936, while underfitting" is a plan.</p></li><li><p><strong>If you have an oracle, you are lucky.</strong> Shiki is why gpu-lexer could be what it is. Most problems have no such thing, and manufacturing a substitute is the project, not a preliminary step.</p></li></ul><p>Still to do: the WGSL port, so the scan actually runs where it was designed to run; a human-labelled gold set, to check the LLM oracle against real taste rather than its own consistency; and a meaning-preservation evaluation where a judge answers questions using only the highlights. And then the reason this was built in the first place — the same architecture, retargeted from "which words matter" to "which words are wrong".</p><p>Every number in this article came from a run in the repository — the metrics table, the prompt iteration percentages, the quantization deltas, the ceiling calculation, the timings. Nothing is estimated. <a target="_blank" rel="noopener noreferrer nofollow" href="./index.html">Try the model</a>.</p>

@@ -7,9 +7,7 @@
  */
 
 import { Editor } from '@tiptap/core';
-import StarterKit from '@tiptap/starter-kit';
-import { TableKit } from '@tiptap/extension-table';
-import { KeepAttributes, PreservedSpan, RawBlock, serializeWithRaw } from './rawblock';
+import { extensions } from './schema';
 
 const statusEl = document.getElementById('status')!;
 const saveBtn = document.getElementById('save') as HTMLButtonElement;
@@ -48,7 +46,7 @@ async function save(editor: Editor): Promise<void> {
     const response = await fetch('/api/article', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: serializeWithRaw(editor) }),
+      body: JSON.stringify({ content: editor.getHTML() }),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({ error: response.statusText }));
@@ -80,15 +78,7 @@ async function boot(): Promise<void> {
 
   const editor = new Editor({
     element: document.getElementById('editor')!,
-    extensions: [
-      // The article has its own heading rhythm and code blocks; keep those, drop the
-      // editor's opinionated extras.
-      StarterKit.configure({ heading: { levels: [2, 3, 4] } }),
-      TableKit.configure({ table: { resizable: false } }),
-      RawBlock,
-      KeepAttributes,
-      PreservedSpan,
-    ],
+    extensions,
     content,
     onCreate: () => setStatus('clean'),
     onUpdate: () => {
