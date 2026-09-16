@@ -269,6 +269,7 @@ def main() -> None:
         Variant("clusters 256", clusters=256),
         Variant("clusters 1024", clusters=1024),
         Variant("projected 32", projected=32),
+        Variant("projected 64", projected=64),
     ]
 
     header = f"{'variant':<18}{'params':>9}{'train':>8}{'val rho':>9}{'P@15%':>8}{'AP':>8}{'% ceil':>8}{'min':>6}"
