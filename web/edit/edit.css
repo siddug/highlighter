@@ -1,0 +1,147 @@
+/* Editor chrome. The article's own stylesheet does the heavy lifting; this adds the
+   toolbar, the raw-block affordances, and enough focus feedback to edit comfortably. */
+
+body.editing {
+  padding-top: 3.4rem;
+}
+
+.toolbar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 20;
+  height: 3.4rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0 clamp(1rem, 4vw, 2rem);
+  background: hsl(40 20% 99% / 0.92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--sans);
+  font-size: 0.85rem;
+}
+
+.toolbar__left {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  min-width: 0;
+}
+.toolbar__left strong {
+  font-family: var(--serif);
+  font-size: 0.98rem;
+}
+.toolbar__hint {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toolbar__right {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  white-space: nowrap;
+}
+
+.status {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--ink-faint);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.status::before {
+  content: '';
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--ink-faint);
+}
+.status[data-state='clean']::before { background: hsl(140 50% 42%); }
+.status[data-state='dirty']::before { background: var(--flame); }
+.status[data-state='saving']::before { background: var(--cool); }
+.status[data-state='error']::before { background: var(--bad); }
+.status[data-state='error'] { color: var(--bad); }
+
+.toolbar button {
+  appearance: none;
+  border: 1px solid var(--rule);
+  background: var(--card);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 0.3rem 0.9rem;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.toolbar button:hover:not(:disabled) { border-color: var(--flame); color: var(--flame); }
+.toolbar button:disabled { opacity: 0.5; cursor: default; }
+.toolbar a { font-size: 0.8rem; color: var(--ink-soft); }
+
+/* --- the editing surface -------------------------------------------------- */
+
+.ProseMirror {
+  outline: none;
+  min-height: 60vh;
+  padding-bottom: 6rem;
+}
+.ProseMirror:focus { outline: none; }
+
+/* Give editable blocks a quiet hover target so it is obvious what can be changed. */
+.ProseMirror > p:hover,
+.ProseMirror > h2:hover,
+.ProseMirror > h3:hover,
+.ProseMirror > h4:hover,
+.ProseMirror > ul:hover,
+.ProseMirror > ol:hover,
+.ProseMirror > blockquote:hover,
+.ProseMirror > pre:hover {
+  box-shadow: -0.75rem 0 0 -0.7rem var(--flame);
+}
+
+.ProseMirror table { cursor: text; }
+.ProseMirror .selectedCell { background: hsl(22 94% 52% / 0.1); }
+
+/* --- preserved blocks ----------------------------------------------------- */
+
+.rawblock {
+  position: relative;
+  margin: 1.5rem 0;
+  border-radius: 10px;
+}
+.rawblock__tag {
+  position: absolute;
+  top: -0.6rem;
+  left: 0.9rem;
+  z-index: 1;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  background: var(--paper);
+  padding: 0 0.45rem;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.rawblock:hover .rawblock__tag { opacity: 1; }
+.rawblock__body > * { margin-top: 0; margin-bottom: 0; }
+
+.rawblock.ProseMirror-selectednode {
+  outline: 2px solid var(--flame);
+  outline-offset: 3px;
+}
+.rawblock:hover {
+  outline: 1px dashed var(--rule);
+  outline-offset: 3px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .toolbar { background: hsl(40 6% 9% / 0.92); }
+}

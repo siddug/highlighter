@@ -20,6 +20,8 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import subprocess
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -38,6 +40,10 @@ CKPT = ROOT / "data" / "checkpoints" / "model.pt"
 
 MAX_BODY = 256 * 1024
 MAX_CHARS = 20_000
+
+ARTICLE_CONTENT = ROOT / "web" / "article.content.html"
+ARTICLE_BUILD = ROOT / "scripts" / "build_article.py"
+MAX_ARTICLE = 4 * 1024 * 1024
 
 _model: SalienceModel
 _lock = Lock()
@@ -128,6 +134,13 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/api/article":
+            if not ARTICLE_CONTENT.exists():
+                self._json(404, {"error": f"{ARTICLE_CONTENT.name} not found"})
+                return
+            self._json(200, {"content": ARTICLE_CONTENT.read_text(encoding="utf-8")})
+            return
+
         if path.startswith("/api/"):
             self._json(404, {"error": "unknown endpoint"})
             return
@@ -161,6 +174,43 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, score_text(text))
         except Exception as exc:  # noqa: BLE001 - never take the server down for one request
             self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
+
+    def do_PUT(self) -> None:  # noqa: N802
+        if self.path.split("?", 1)[0] != "/api/article":
+            self._json(404, {"error": "unknown endpoint"})
+            return
+
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > MAX_ARTICLE:
+            self._json(413, {"error": f"body must be 1..{MAX_ARTICLE} bytes"})
+            return
+
+        try:
+            content = json.loads(self.rfile.read(length).decode("utf-8"))["content"]
+            if not isinstance(content, str):
+                raise TypeError("content must be a string")
+        except (json.JSONDecodeError, KeyError, TypeError, UnicodeDecodeError) as exc:
+            self._json(400, {"error": f"expected JSON with a string 'content' field: {exc}"})
+            return
+
+        # An empty or near-empty body almost certainly means the editor failed to load the
+        # document rather than that someone deleted the article, and overwriting 141 KB of
+        # prose with nothing is not recoverable from here.
+        if len(content.strip()) < 500:
+            self._json(400, {"error": "refusing to save a near-empty article"})
+            return
+
+        with _lock:
+            ARTICLE_CONTENT.write_text(content, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ARTICLE_BUILD)], capture_output=True, text=True
+            )
+        if result.returncode != 0:
+            self._json(500, {"error": f"saved, but rebuild failed: {result.stderr[:300]}"})
+            return
+
+        print(f"  saved article: {len(content):,} chars")
+        self._json(200, {"ok": True, "bytes": len(content.encode("utf-8"))})
 
     def _serve_static(self, path: str) -> None:
         if not DIST.exists():

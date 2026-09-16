@@ -1,46 +1,4 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>A 39,361-parameter model that reads for you</title>
-    <meta
-      name="description"
-      content="Reverse-engineering Vercel's gpu-lexer and pointing its architecture at English prose — explained from first principles, every line of code."
-    />
-    <link rel="stylesheet" href="./article.css" />
-  </head>
-  <body>
-    <header class="top">
-      <div class="wrap">
-        <p class="kicker">Small models · Architecture archaeology · Annotated build log</p>
-        <h1>A 39,361-parameter model that reads for you</h1>
-        <p class="standfirst">
-          Vercel Labs shipped a syntax highlighter that is a neural network — 41k parameters,
-          27&nbsp;KB, running as WebGPU compute shaders, with no grammar files. There is no repo
-          and no blog post explaining it. So we decoded it from the published bundle, then
-          pointed the same architecture at a different problem: finding the words in an English
-          paragraph that carry its meaning.
-        </p>
-        <p class="standfirst">
-          This is the long version. It assumes you have heard of gradient descent and attention
-          but have never written a line of PyTorch, and it explains every piece of the
-          implementation — what the code does, why it is shaped that way, and what each number
-          means.
-        </p>
-        <p class="byline">
-          <span>~45 min read</span>
-          <span>·</span>
-          <a href="./index.html">Try the model</a>
-          <span>·</span>
-          <span>Every number here is measured, not estimated</span>
-          <span>·</span>
-          <a href="./edit.html">Edit</a>
-        </p>
-      </div>
-    </header>
 
-    <div class="wrap">
       <nav class="toc">
         <h2>Contents</h2>
         <p class="part">Part one — the problem</p>
@@ -2837,6 +2795,4 @@ corr(truth, measured)
           the timings. Nothing is estimated. <a href="./index.html">Try the model</a>.
         </p>
       </footer>
-    </div>
-  </body>
-</html>
+    

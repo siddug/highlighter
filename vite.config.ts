@@ -14,11 +14,15 @@ export default defineConfig({
     outDir: '../dist',
     emptyOutDir: true,
     rollupOptions: {
-      input: { main: 'web/index.html', article: 'web/article.html' },
+      input: {
+        main: 'web/index.html',
+        article: 'web/article.html',
+        edit: 'web/edit.html',
+      },
     },
   },
   test: {
     root: '.',
-    include: ['ts/**/*.test.ts'],
+    include: ['ts/**/*.test.ts', 'web/**/*.test.ts'],
   },
 });

@@ -120,9 +120,18 @@ python3 -m pytest salience/tests -q  # Python
 npm run build && python3 serve.py    # http://localhost:8000
 ```
 
-Two pages: the highlighter at `/`, and a long-form write-up of how it was built at
-`/article.html` — the problem, the decoded gpu-lexer architecture, the oracle problem, the
-scan, the bugs, and the results, with diagrams.
+Three pages: the highlighter at `/`, a long-form write-up of how it was built at
+`/article.html`, and a TipTap editor for that article at `/edit.html`.
+
+The editor writes through to `web/article.content.html` on disk — not localStorage — so
+the article is co-writable: edit in the browser, and the change is a file both authors can
+read and diff. Saving also regenerates the static reader page, so the two never drift.
+
+`web/edit/roundtrip.test.ts` is the load-bearing part. ProseMirror silently discards any
+element its schema does not recognise, so without care the first save would have deleted
+every SVG figure, every callout, and all 59 syntax-colouring spans inside the code blocks —
+141 KB of article reduced to its paragraphs, with no error anywhere. Thirteen assertions
+now pin figures, classes, ids, inline spans and code colouring across two save cycles.
 
 `serve.py` is standard library only — no web framework. It serves the built client and
 exposes the PyTorch model at `POST /api/score`, so the **Run on: browser / server** toggle

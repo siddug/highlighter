@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Editing — A 39,361-parameter model that reads for you</title>
+    <link rel="stylesheet" href="./article.css" />
+    <link rel="stylesheet" href="./edit/edit.css" />
+  </head>
+  <body class="editing">
+    <div class="toolbar">
+      <div class="toolbar__left">
+        <strong>Editing the article</strong>
+        <span class="toolbar__hint">changes save to web/article.content.html</span>
+      </div>
+      <div class="toolbar__right">
+        <span id="status" class="status">loading…</span>
+        <button id="save" type="button">Save now</button>
+        <a href="./article.html" id="read">Read view &rarr;</a>
+      </div>
+    </div>
+
+    <div class="wrap">
+      <div id="editor"></div>
+    </div>
+
+    <script type="module" src="./edit/main.ts"></script>
+  </body>
+</html>
