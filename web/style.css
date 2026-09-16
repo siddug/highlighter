@@ -402,6 +402,12 @@ output {
   font-weight: 500;
 }
 
+/* Sentence separators: present enough to group, quiet enough not to read as words. */
+.digest .stop {
+  color: var(--flame);
+  font-weight: 600;
+}
+
 /* --- colophon ----------------------------------------------------------- */
 
 .colophon {

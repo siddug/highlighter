@@ -115,12 +115,32 @@ function paint(result: Scored): void {
     output.append(span);
   }
 
+  // Break the residue at sentence boundaries. Without it the words run together and you
+  // lose which facts belong to each other — "failed twice lock wasn't" reads as one claim
+  // when it is two.
   digest.replaceChildren();
+  const fullStop = () => {
+    const stop = document.createElement('span');
+    stop.className = 'stop';
+    stop.textContent = '.';
+    return stop;
+  };
+
+  let sentence = -2;
   for (const i of [...picked].sort((a, b) => a - b)) {
-    const b = document.createElement('b');
-    b.textContent = tokens[i]!.text;
-    digest.append(b, ' ');
+    const token = tokens[i]!;
+    if (sentence !== -2) {
+      // Separator goes before the word, so the stop sits tight against the previous one
+      // rather than floating after a trailing space.
+      if (token.sentence !== sentence) digest.append(fullStop());
+      digest.append(' ');
+    }
+    const word = document.createElement('b');
+    word.textContent = token.text;
+    digest.append(word);
+    sentence = token.sentence;
   }
+  if (picked.size > 0) digest.append(fullStop());
 
   const wordCount = tokens.filter((t) => t.cls === WORD).length;
   stat.tokens.textContent = String(tokens.length);

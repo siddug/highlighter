@@ -89,6 +89,8 @@ def score_text(text: str) -> dict:
             "end": f.end,
             "cls": f.cls,
             "score": round(float(probs[i]), 6) if f.cls == WORD else 0.0,
+            # Tokens sharing this value are in the same sentence; the client groups on it.
+            "sentence": f.sentence_first_word,
         }
         for i, f in enumerate(feats)
     ]

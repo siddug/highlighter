@@ -60,7 +60,8 @@ def card(rec: dict) -> str:
     targets = rec["targets"]
 
     pieces: list[str] = []
-    residue: list[str] = []
+    groups: list[list[str]] = []
+    sentence = None
     w = 0
     for f in feats:
         text = html.escape(f.text)
@@ -73,8 +74,13 @@ def card(rec: dict) -> str:
         else:
             pieces.append(text)
         if target >= 0.5:
-            residue.append(text)
+            # Same sentence grouping as the app, so the two views agree.
+            if f.sentence_first_word != sentence or not groups:
+                groups.append([])
+                sentence = f.sentence_first_word
+            groups[-1].append(text)
         w += 1
+    residue = [". ".join(" ".join(g) for g in groups) + "."] if groups else []
 
     rate = sum(1 for t in targets if t >= 0.5) / max(1, len(targets))
     unanimous = sum(1 for t in targets if t == 1.0)

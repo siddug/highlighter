@@ -96,7 +96,16 @@ class TestSoftTargets:
 
 
 def test_render_highlights_preserves_order() -> None:
-    assert render_highlights(PARAGRAPH, [1, 3, 8, 11]) == "reactor criticality not fault"
+    assert render_highlights(PARAGRAPH, [1, 3, 8, 11]) == "reactor criticality. not fault."
+
+
+def test_render_highlights_groups_by_sentence() -> None:
+    # A full stop marks the boundary so "criticality" and "not" do not read as one claim.
+    assert render_highlights(PARAGRAPH, [3, 8]) == "criticality. not."
+
+
+def test_render_highlights_within_one_sentence_has_no_internal_stop() -> None:
+    assert render_highlights(PARAGRAPH, [1, 3]) == "reactor criticality."
 
 
 def test_render_highlights_with_nothing_marked() -> None:

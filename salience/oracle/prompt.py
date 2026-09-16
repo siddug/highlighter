@@ -160,7 +160,26 @@ def to_soft_targets(samples: list[list[int]], word_count: int) -> list[float]:
 
 
 def render_highlights(text: str, marked: list[int]) -> str:
-    """The telegraphic residue a reader would actually see. Used for eyeballing labels."""
-    words = word_tokens(text)
+    """The telegraphic residue a reader would actually see. Used for eyeballing labels.
+
+    Grouped by sentence with full stops between groups. Without them the words run
+    together and it stops being clear which facts belong to each other — "failed twice
+    lock wasn't" reads as one claim when it is two.
+    """
+    feats = extract_features(text)
     chosen = set(marked)
-    return " ".join(surface for w, (_, surface) in enumerate(words) if w in chosen)
+
+    groups: list[list[str]] = []
+    sentence = None
+    word_index = 0
+    for f in feats:
+        if f.cls != WORD:
+            continue
+        if word_index in chosen:
+            if f.sentence_first_word != sentence or not groups:
+                groups.append([])
+                sentence = f.sentence_first_word
+            groups[-1].append(f.text)
+        word_index += 1
+
+    return ". ".join(" ".join(g) for g in groups) + ("." if groups else "")

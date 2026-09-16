@@ -15,6 +15,11 @@ export interface ScoredToken {
   cls: number;
   /** Salience in [0,1]. Always 0 for non-WORD tokens — the head skips them. */
   score: number;
+  /**
+   * Token index of the first WORD of this token's sentence, or -1. Tokens sharing a value
+   * are in the same sentence, so this doubles as a sentence id for grouping output.
+   */
+  sentence: number;
 }
 
 function sigmoid(x: number): number {
@@ -297,6 +302,7 @@ export function forward(text: string, w: Weights): { scored: ScoredToken[]; inte
     end: f.end,
     cls: f.cls,
     score: f.cls === WORD ? headScore(local, gf, gb, t, w) : 0,
+    sentence: f.sentenceFirstWord,
   }));
 
   return { scored, inter: { feats, emb, local, gf, gb } };
