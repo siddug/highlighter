@@ -5,9 +5,9 @@ meaning — enough that reading only the highlights tells you what it said, with
 summarizing. It ships as **21.1 KB** of Brotli-compressed weights and runs entirely in the
 browser.
 
-**[Try it](https://highlighter.siddg.com)** · **[Read the full write-up](https://highlighter.siddg.com/article)**
+[Try it](https://highlighter-sigma.vercel.app/)
 
-This README is the short version. The [article](https://highlighter.siddg.com/article) is
+This README is the short version. The [article](https://highlighter-sigma.vercel.app/article) is
 the long one, and explains every line of the implementation from first principles.
 
 ## Why not just summarize?
