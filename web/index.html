@@ -50,7 +50,16 @@
               <input id="rate" type="range" min="5" max="50" step="1" value="20" />
               <output id="rateOut">20%</output>
             </label>
-            <div class="control control--toggle" role="group" aria-label="Inference runtime">
+            <!-- Revealed only when a local PyTorch server answers /api/health. The hosted
+                 build has no such endpoint, and a control that cannot work is worse than
+                 no control. -->
+            <div
+              id="runtimeControl"
+              class="control control--toggle"
+              role="group"
+              aria-label="Inference runtime"
+              hidden
+            >
               <span class="control__label">Run on</span>
               <div class="segmented">
                 <button id="runBrowser" class="seg is-active" type="button">browser</button>
@@ -80,9 +89,12 @@
       <section class="panel panel--digest">
         <div class="panel__head">
           <h2>Highlights only</h2>
-          <span class="panel__hint">the real test — does this still tell you what it said?</span>
+          <button id="copyBtn" class="ghost" type="button">Copy</button>
         </div>
         <p id="digest" class="digest"></p>
+        <p class="panel__hint panel__hint--left">
+          the real test — does this still tell you what it said?
+        </p>
       </section>
 
       <footer class="colophon">
@@ -95,7 +107,19 @@
         <p>
           Trained on 10,000 LLM-labeled paragraphs across Wikipedia, news, essays, work email
           and research abstracts. Weights are 6-bit quantized: one base-63 character per
-          parameter. <a href="./article.html">Read how it was built &rarr;</a>
+          parameter.
+        </p>
+        <p>
+          <a
+            href="https://www.siddg.com/creating-a-small-21kb-model-to-highlight-important-words-in-a-paragraph"
+            rel="noreferrer"
+            target="_blank"
+            >Read how it was built &rarr;</a
+          >
+          &nbsp;·&nbsp;
+          <a href="https://github.com/siddg/highlighter" rel="noreferrer" target="_blank"
+            >Source on GitHub</a
+          >
         </p>
       </footer>
     </div>

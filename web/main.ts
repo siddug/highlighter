@@ -95,12 +95,17 @@ function pickTop(tokens: ScoredToken[], fraction: number): Set<number> {
 
 // --- rendering -------------------------------------------------------------
 
-function paint(result: Scored): void {
+/** How long the marks take to sweep across the paragraph, regardless of its length. */
+const SWEEP_MS = 220;
+
+function paint(result: Scored, sweep = false): void {
   const { tokens, ms, delta } = result;
   const fraction = Number(rate.value) / 100;
   const picked = pickTop(tokens, fraction);
 
+  output.classList.toggle('is-sweeping', sweep);
   output.replaceChildren();
+  let marked = 0;
   for (const [i, token] of tokens.entries()) {
     if (token.cls !== WORD) {
       output.append(document.createTextNode(token.text));
@@ -109,7 +114,15 @@ function paint(result: Scored): void {
     const span = document.createElement('span');
     const on = picked.has(i);
     span.className = `w ${on ? 'on' : 'off'}`;
-    if (on) span.style.setProperty('--a', (0.16 + 0.55 * token.score).toFixed(3));
+    if (on) {
+      span.style.setProperty('--a', (0.16 + 0.55 * token.score).toFixed(3));
+      // Spread the delay across the whole sweep rather than a fixed per-item step, so
+      // long paragraphs do not turn a flourish into a wait.
+      if (sweep && picked.size > 1) {
+        span.style.setProperty('--d', `${Math.round((marked / (picked.size - 1)) * SWEEP_MS)}ms`);
+      }
+      marked++;
+    }
     span.textContent = token.text;
     span.dataset.score = token.score.toFixed(4);
     output.append(span);
@@ -159,7 +172,12 @@ function setNotice(message: string | null): void {
 
 let lastResult: Scored | null = null;
 
-async function render(): Promise<void> {
+/**
+ * `sweep` is a frequency judgement, not a taste one. Picking a sample or loading the page
+ * happens once, so the marks can animate on. Typing and dragging the rate slider fire tens
+ * of times a second, and an animation there would charge its cost on every keystroke.
+ */
+async function render(sweep = false): Promise<void> {
   rateOut.textContent = `${rate.value}%`;
   const text = input.value;
 
@@ -177,7 +195,7 @@ async function render(): Promise<void> {
       if (seq !== requestSeq) return;
       setNotice(null);
       lastResult = result;
-      paint(result);
+      paint(result, sweep);
       return;
     } catch (error) {
       if (seq !== requestSeq) return;
@@ -192,7 +210,7 @@ async function render(): Promise<void> {
   const result = scoreInBrowser(text);
   if (seq !== requestSeq) return;
   lastResult = result;
-  paint(result);
+  paint(result, sweep);
 }
 
 /** Repaint from cached scores. Changing the rate does not need a re-run. */
@@ -227,7 +245,7 @@ for (const [i, sample] of SAMPLES.entries()) {
   chip.addEventListener('click', () => {
     selectSample(i);
     input.value = sample.text;
-    void render();
+    void render(true);
   });
   sampleRow.append(chip);
 }
@@ -271,11 +289,54 @@ output.addEventListener('mouseout', (event) => {
   hover.textContent = 'hover a word for its score';
 });
 
-// ?runtime=server is handy for testing the server path and for sharing a link that
-// demonstrates both runtimes agreeing.
-const requested = new URLSearchParams(location.search).get('runtime');
-selectRuntime(requested === 'server' ? 'server' : 'browser');
+el('copyBtn').addEventListener('click', async () => {
+  const button = el<HTMLButtonElement>('copyBtn');
+  const text = digest.textContent ?? '';
+  if (text === '') return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    return;
+  }
+  // Motion is never the only feedback channel — the label carries the state on its own.
+  button.textContent = 'Copied';
+  window.setTimeout(() => {
+    button.textContent = 'Copy';
+  }, 1400);
+});
 
+/**
+ * The PyTorch server only exists when someone runs `python3 serve.py` next to this page.
+ * On the hosted build there is no `/api`, so the runtime toggle stays hidden rather than
+ * offering a choice that resolves to an error and a fallback notice.
+ */
+async function detectServer(): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 1500);
+    const response = await fetch('/api/health', { signal: controller.signal });
+    window.clearTimeout(timer);
+    if (!response.ok) return false;
+    // A 200 is not enough: static hosts commonly answer unknown paths with the index
+    // page, which would reveal a toggle backed by nothing. Require the real payload.
+    const body = (await response.json()) as { ok?: boolean };
+    return body.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+selectRuntime('browser');
 selectSample(activeSample);
 input.value = SAMPLES[activeSample]!.text;
-void render();
+void render(true);
+
+void detectServer().then((available) => {
+  if (!available) return;
+  el('runtimeControl').hidden = false;
+  // ?runtime=server is handy for sharing a link that demonstrates both runtimes agreeing.
+  if (new URLSearchParams(location.search).get('runtime') === 'server') {
+    selectRuntime('server');
+    void render();
+  }
+});

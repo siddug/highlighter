@@ -9,10 +9,14 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
-# Labeled corpora and oracle caches are large and regenerable; weights are committed.
-data/raw/
-data/labeled/
+# No corpus is redistributed here. The source paragraphs come from third-party datasets
+# whose terms differ, and `salience/data/corpus.py` re-fetches them in one command. The
+# trained weights are committed, so the demo works without any of this.
+data/
 salience/oracle/.cache/
+
+# Editing backups written by scripts/portablize.py and scripts/tables_to_pre.py.
+*.bak
 
 .DS_Store
 *.log

@@ -15,7 +15,25 @@
   --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
 
-  --radius: 10px;
+  /* Concentric radii: outer = inner + padding. Nested corners that do not share a
+     centre are the single most common reason an interface reads as slightly wrong. */
+  --pad: 18px;
+  --r-inner: 6px;
+  --r-outer: calc(var(--r-inner) + var(--pad));
+
+  /* The built-in CSS easings are too weak to read as intentional. */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --t-press: 160ms;
+  --t-fast: 120ms;
+  --t-base: 180ms;
+
+  /* Depth is a shadow. Borders are reserved for structure and state. */
+  --lift:
+    0 1px 2px oklch(0 0 0 / 0.04),
+    0 4px 12px oklch(0 0 0 / 0.04),
+    0 12px 32px oklch(0 0 0 / 0.03);
+  --hairline: transparent;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -28,6 +46,9 @@
     --rule: #2d2b26;
     --rule-soft: #24221e;
     --flame-l: 58%;
+    /* Shadows do not read on a dark surface, so depth falls back to a hairline. */
+    --lift: none;
+    --hairline: var(--rule);
   }
 }
 
@@ -35,6 +56,12 @@
 *::before,
 *::after {
   box-sizing: border-box;
+}
+
+/* An author `display` rule outranks the user-agent's `[hidden] { display: none }`, so
+   every `hidden` element laid out with flex or grid stays visible. This restores it. */
+[hidden] {
+  display: none !important;
 }
 
 html {
@@ -146,12 +173,17 @@ h1 {
   font: inherit;
   font-size: 0.82rem;
   cursor: pointer;
-  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  transition-property: border-color, color, background-color, scale;
+  transition-duration: var(--t-fast);
+  transition-timing-function: var(--ease-out);
 }
 
-.chip:hover {
-  border-color: hsl(var(--flame-h) var(--flame-s) var(--flame-l) / 0.55);
-  color: var(--ink);
+/* Hover is a pointer affordance. On touch it sticks after the tap and reads as state. */
+@media (hover: hover) and (pointer: fine) {
+  .chip:hover {
+    border-color: hsl(var(--flame-h) var(--flame-s) var(--flame-l) / 0.55);
+    color: var(--ink);
+  }
 }
 
 .chip.is-active {
@@ -177,9 +209,10 @@ h1 {
 
 .panel {
   background: var(--card);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  padding: 1.1rem 1.25rem 1.25rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-outer);
+  padding: var(--pad);
+  box-shadow: var(--lift);
 }
 
 .panel--digest {
@@ -216,6 +249,13 @@ h1 {
   font-variant-numeric: tabular-nums;
 }
 
+.panel__hint--left {
+  margin: 0.9rem 0 0;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--rule-soft);
+  text-align: left;
+}
+
 .ghost {
   appearance: none;
   background: none;
@@ -228,10 +268,22 @@ h1 {
   text-decoration: underline;
   text-underline-offset: 3px;
   text-decoration-color: var(--rule);
+  transition-property: color, scale;
+  transition-duration: var(--t-press);
+  transition-timing-function: var(--ease-out);
 }
 
-.ghost:hover {
-  color: var(--flame);
+@media (hover: hover) and (pointer: fine) {
+  .ghost:hover {
+    color: var(--flame);
+  }
+}
+
+/* Tactile confirmation that the press registered. 0.96 exactly — below 0.95 exaggerates. */
+.chip:active,
+.ghost:active,
+.seg:active {
+  scale: 0.96;
 }
 
 /* --- input -------------------------------------------------------------- */
@@ -241,18 +293,20 @@ textarea {
   min-height: 16rem;
   padding: 0.9rem 1rem;
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: var(--r-inner);
   background: var(--paper);
   color: var(--ink);
   font-family: var(--serif);
   font-size: 1rem;
   line-height: 1.65;
   resize: vertical;
+  transition: border-color var(--t-fast) var(--ease-out);
 }
 
 textarea:focus-visible,
 .chip:focus-visible,
 .seg:focus-visible,
+.ghost:focus-visible,
 input[type='range']:focus-visible {
   outline: 2px solid hsl(var(--flame-h) var(--flame-s) var(--flame-l) / 0.6);
   outline-offset: 2px;
@@ -309,7 +363,9 @@ output {
   font-size: 0.74rem;
   padding: 0.28rem 0.75rem;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition-property: background-color, color, scale;
+  transition-duration: var(--t-fast);
+  transition-timing-function: var(--ease-out);
 }
 
 .seg.is-active {
@@ -320,7 +376,7 @@ output {
 .notice {
   margin: 0.8rem 0 0;
   padding: 0.5rem 0.7rem;
-  border-radius: 6px;
+  border-radius: var(--r-inner);
   background: hsl(var(--flame-h) var(--flame-s) var(--flame-l) / 0.1);
   border: 1px solid hsl(var(--flame-h) var(--flame-s) var(--flame-l) / 0.3);
   font-size: 0.82rem;
@@ -349,13 +405,12 @@ output {
   border-radius: 3px;
   padding: 0.04em 0.06em;
   margin: 0 -0.06em;
-  transition: background-color 0.18s ease, color 0.18s ease;
   cursor: default;
 }
 
 /* Alpha carries confidence, so the ranking is visible and not just the cutoff. */
 .w.on {
-  background: hsl(var(--flame-h) var(--flame-s) var(--flame-l) / var(--a, 0.25));
+  background-color: hsl(var(--flame-h) var(--flame-s) var(--flame-l) / var(--a, 0.25));
   color: var(--ink);
 }
 
@@ -365,6 +420,23 @@ output {
 
 .w.peek {
   outline: 1px solid hsl(var(--flame-h) var(--flame-s) var(--flame-l) / 0.8);
+}
+
+/* The marks sweep on in reading order, which shows the model scoring left to right.
+   Applied only when the text itself changed — dragging the rate slider repaints tens of
+   times a second, and an animation there charges its cost on every frame. The per-word
+   delay is set inline and capped, so a 400-word paragraph sweeps in the same 220ms a
+   40-word one does. Keyframes rather than a transition: this is a staged sequence that
+   runs once, not an interruptible state change. */
+@keyframes mark-in {
+  from {
+    background-color: hsl(var(--flame-h) var(--flame-s) var(--flame-l) / 0);
+  }
+}
+
+.reading.is-sweeping .w.on {
+  animation: mark-in 260ms var(--ease-out) both;
+  animation-delay: var(--d, 0ms);
 }
 
 .stats {
@@ -428,14 +500,26 @@ output {
 .colophon a {
   color: var(--ink-soft);
   text-underline-offset: 2px;
+  transition: color var(--t-fast) var(--ease-out);
 }
 
-.colophon a:hover {
-  color: var(--flame);
+@media (hover: hover) and (pointer: fine) {
+  .colophon a:hover {
+    color: var(--flame);
+  }
 }
 
+/* Reduced motion means fewer and gentler animations, not none: the colour fades that
+   explain a state change stay, the movement goes. */
 @media (prefers-reduced-motion: reduce) {
-  * {
-    transition: none !important;
+  .reading.is-sweeping .w.on {
+    animation-duration: 120ms;
+    animation-delay: 0ms;
+  }
+
+  .chip:active,
+  .ghost:active,
+  .seg:active {
+    scale: 1;
   }
 }

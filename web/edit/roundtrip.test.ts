@@ -82,9 +82,15 @@ describe('article round-trip through the editor', () => {
     expect(twice).toBe(saved);
   });
 
-  it('preserves specific hard-won numbers', () => {
-    for (const fact of ['39,361', '0.936', '0.704', '23,584', '78×']) {
-      expect(saved, fact).toContain(fact);
-    }
+  it('preserves every measured number', () => {
+    // Hardcoding a list made this assert the article's *content*, so deleting a section
+    // failed it for the wrong reason. What it is actually for is catching the editor
+    // dropping text on the way through — so derive the list from the input, and require
+    // every number in it to survive.
+    const numbers = (html: string) =>
+      new Set(html.replace(/<[^>]+>/g, ' ').match(/\d[\d,]*\.?\d*/g) ?? []);
+    const before = numbers(original);
+    const after = numbers(saved);
+    expect([...before].filter((n) => !after.has(n))).toEqual([]);
   });
 });

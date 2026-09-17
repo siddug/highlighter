@@ -14,11 +14,16 @@ export default defineConfig({
     outDir: '../dist',
     emptyOutDir: true,
     rollupOptions: {
-      input: {
-        main: 'web/index.html',
-        article: 'web/article.html',
-        edit: 'web/edit.html',
-      },
+      // The editor saves through to disk via `serve.py`, and the article is published on
+      // siddg.com. Neither belongs on the public deploy: the write endpoint does not
+      // exist there, so every save would fail silently.
+      input: process.env.DEPLOY
+        ? { main: 'web/index.html' }
+        : {
+            main: 'web/index.html',
+            article: 'web/article.html',
+            edit: 'web/edit.html',
+          },
     },
   },
   test: {
