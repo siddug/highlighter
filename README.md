@@ -5,10 +5,10 @@ meaning — enough that reading only the highlights tells you what it said, with
 summarizing. It ships as **21.1 KB** of Brotli-compressed weights and runs entirely in the
 browser.
 
-**[Try it](https://highlighter.siddg.com)** · **[Read the full write-up](https://www.siddg.com/creating-a-small-21kb-model-to-highlight-important-words-in-a-paragraph)**
+**[Try it](https://highlighter.siddg.com)** · **[Read the full write-up](https://highlighter.siddg.com/article)**
 
-This README is the short version. The article is the long one, and explains every line of
-the implementation from first principles.
+This README is the short version. The [article](https://highlighter.siddg.com/article) is
+the long one, and explains every line of the implementation from first principles.
 
 ## Why not just summarize?
 
